@@ -1,0 +1,11 @@
+{
+  "attributes": {
+    "LeaderboardPageSize": 100.0,
+    "LossTrophies": 5.0,
+    "QueueEntryTTL": 45.0,
+    "QueuePollInterval": 2.0,
+    "ResultReplayWindow": 300.0,
+    "WinTrophies": 10.0,
+    "_lemonadeUniqueId": "52EuxL5L52Eu"
+  }
+}
