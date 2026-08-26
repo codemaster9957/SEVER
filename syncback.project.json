@@ -1,0 +1,39 @@
+{
+  "name": "SEVER Syncback",
+  "tree": {
+    "$className": "DataModel",
+    "ReplicatedFirst": {
+      "$className": "ReplicatedFirst",
+      "$path": "migration/ReplicatedFirst"
+    },
+    "ReplicatedStorage": {
+      "$className": "ReplicatedStorage",
+      "$path": "migration/ReplicatedStorage"
+    },
+    "ServerScriptService": {
+      "$className": "ServerScriptService",
+      "$path": "migration/ServerScriptService"
+    },
+    "ServerStorage": {
+      "$className": "ServerStorage",
+      "$path": "migration/ServerStorage"
+    },
+    "StarterGui": {
+      "$className": "StarterGui",
+      "$path": "migration/StarterGui"
+    },
+    "StarterPack": {
+      "$className": "StarterPack",
+      "$path": "migration/StarterPack"
+    },
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "$path": "migration/StarterPlayer"
+    }
+  },
+  "syncbackRules": {
+    "syncCurrentCamera": false,
+    "syncUnscriptable": false,
+    "ignoreReferents": true
+  }
+}
