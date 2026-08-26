@@ -4,23 +4,28 @@
     "$className": "DataModel",
 
     "ReplicatedStorage": {
-      "Shared": {
-        "$path": "src/shared"
-      }
+      "$path": "migration/ReplicatedStorage",
+      "$ignoreUnknownInstances": true
     },
 
     "ServerScriptService": {
-      "Server": {
-        "$path": "src/server"
-      }
+      "$path": "migration/ServerScriptService",
+      "$ignoreUnknownInstances": true
+    },
+
+    "ServerStorage": {
+      "$path": "migration/ServerStorage",
+      "$ignoreUnknownInstances": true
+    },
+
+    "StarterPack": {
+      "$path": "migration/StarterPack",
+      "$ignoreUnknownInstances": true
     },
 
     "StarterPlayer": {
-      "StarterPlayerScripts": {
-        "Client": {
-          "$path": "src/client"
-        }
-      }
+      "$path": "migration/StarterPlayer",
+      "$ignoreUnknownInstances": true
     }
   }
 }
