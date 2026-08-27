@@ -13,11 +13,15 @@ local REQUEST_COOLDOWN = 0.04
 local lastRequest = {}
 local sessions = {}
 
-local function endBlock(player: Player, character: Model)
+local function endBlock(player: Player, character: Model?)
 	sessions[player] = (sessions[player] or 0) + 1
-	character:SetAttribute("IsBlocking", false)
-	character:SetAttribute("IsParrying", false)
-	character:SetAttribute("ParryExpiresAt", 0)
+
+	if character and character.Parent then
+		character:SetAttribute("IsBlocking", false)
+		character:SetAttribute("IsParrying", false)
+		character:SetAttribute("ParryExpiresAt", 0)
+	end
+
 	DamageHandler.SetBlocking(player, false)
 end
 
@@ -70,9 +74,7 @@ end)
 
 local function setupPlayer(player: Player)
 	player.CharacterRemoving:Connect(function(character)
-		if player.Character == character then
-			endBlock(player, character)
-		end
+		endBlock(player, character)
 	end)
 end
 
