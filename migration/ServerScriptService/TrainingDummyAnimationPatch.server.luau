@@ -46,7 +46,7 @@ local function unlockCurrentController(battle)
 		controller.dummy:SetAttribute("TrainingFightLive", true)
 	end
 	if controller._severAnimator then
-		controller._severAnimator:SetLocomotionEnabled(controller.level >= 2)
+		controller._severAnimator:SetLocomotionEnabled(controller.level >= 1)
 	end
 end
 
@@ -76,7 +76,7 @@ CombatAI.new = function(player, battle, level, memory)
 
 	controller._severAnimator = TrainingDummyAnimator.new(controller.dummy)
 	if controller._severAnimator then
-		controller._severAnimator:SetLocomotionEnabled(Lifecycle.ShouldRunAI(battle) and controller.level >= 2)
+		controller._severAnimator:SetLocomotionEnabled(Lifecycle.ShouldRunAI(battle) and controller.level >= 1)
 	end
 
 	if not Lifecycle.ShouldRunAI(battle) then
@@ -94,7 +94,7 @@ CombatAI._heartbeat = function(self, dt)
 		self.dummy:SetAttribute("TrainingFightLive", true)
 	end
 	if self._severAnimator then
-		self._severAnimator:SetLocomotionEnabled(self.level >= 2)
+		self._severAnimator:SetLocomotionEnabled(self.level >= 1)
 	end
 	return originalHeartbeat(self, dt)
 end
