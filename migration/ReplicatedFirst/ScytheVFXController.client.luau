@@ -243,7 +243,10 @@ local function connectLocalTool(tool: Tool)
 			return
 		end
 
+		-- Immediate local feedback (important on touch/high latency), then ask the
+		-- server to relay VFX to the opponent after independent validation.
 		requestSlash(LocalPlayer.UserId, character)
+		VFXEvent:FireServer("Slash")
 	end)
 end
 
