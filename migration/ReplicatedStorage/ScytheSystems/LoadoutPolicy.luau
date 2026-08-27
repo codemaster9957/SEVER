@@ -24,7 +24,7 @@ LoadoutPolicy.Moves = table.freeze({
 		Id = "soul_reap",
 		Name = "Soul Reap",
 		Description = "Burst through the lane at extreme speed and reap anyone caught in the dash.",
-		Cooldown = 8,
+		Cooldown = 9,
 	}),
 })
 
