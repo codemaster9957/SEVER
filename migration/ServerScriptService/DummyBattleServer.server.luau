@@ -10,16 +10,20 @@ local TrainingControls = MatchEvents:WaitForChild("TrainingDummyControls")
 local SetInfiniteHealthRemote = TrainingControls:WaitForChild("SetInfiniteHealth")
 local RespawnDummyRemote = TrainingControls:WaitForChild("RespawnDummy")
 local ReturnToLobbyRemote = TrainingControls:WaitForChild("ReturnToLobby")
+local SetDummyLevelRemote = TrainingControls:WaitForChild("SetDummyLevel")
 
 local DamageHandler = require(ReplicatedStorage:WaitForChild("DamageHandler"))
 local CombatJuice = require(ReplicatedStorage:WaitForChild("CombatJuice"))
 local MatchManager = require(ServerScriptService:WaitForChild("MatchManager"))
+local DataService = require(ServerScriptService:WaitForChild("DataService"))
+local TrainingDummyAI = require(ServerScriptService:WaitForChild("TrainingDummyAI"))
+local TrainingDummyCombatAI = require(ServerScriptService:WaitForChild("TrainingDummyCombatAI"))
 
 local ArenasFolder = workspace:WaitForChild("Arenas")
 local TrainingDummy = workspace:WaitForChild("training")
 
-local MATCH_DURATION = 90
 local RESULT_DISPLAY_TIME = 1.5
+local HUD_UPDATE_INTERVAL = 0.1
 
 -- [Player] = battleData
 local activeDummyBattles = {}
@@ -58,6 +62,27 @@ local function safeMatchManagerCall(methodName, ...)
 	return true, result
 end
 
+local function getTrainingProfile(player)
+	local profile = DataService.GetProfile(player)
+	local level = 1
+	local memory = TrainingDummyAI.ReconcileMemory(nil)
+
+	if profile then
+		level = TrainingDummyAI.ClampLevel(profile.TrainingDummyLevel or 1)
+		memory = TrainingDummyAI.ReconcileMemory(profile.TrainingAIMemory)
+		profile.TrainingDummyLevel = level
+		profile.TrainingAIMemory = memory
+	end
+
+	return profile, level, memory
+end
+
+local function savePreferredLevel(player, level)
+	DataService.UpdateProfile(player, function(profile)
+		profile.TrainingDummyLevel = TrainingDummyAI.ClampLevel(level)
+	end)
+end
+
 -- Searches recursively so arena spawns may be inside folders or models.
 local function findSpawn(arena, spawnName)
 	for _, descendant in ipairs(arena:GetDescendants()) do
@@ -66,7 +91,6 @@ local function findSpawn(arena, spawnName)
 			return descendant
 		end
 	end
-
 	return nil
 end
 
@@ -83,33 +107,17 @@ local function resolveArena(arenaReference)
 	end
 
 	local success, availableArena = safeMatchManagerCall("GetAvailableArena")
-	if not success then
-		return nil
-	end
-
-	if typeof(availableArena) == "Instance" then
-		return availableArena
-	end
-
-	if type(availableArena) == "string" then
-		return ArenasFolder:FindFirstChild(availableArena)
-	end
-
+	if not success then return nil end
+	if typeof(availableArena) == "Instance" then return availableArena end
+	if type(availableArena) == "string" then return ArenasFolder:FindFirstChild(availableArena) end
 	return nil
 end
 
 local function setInMatch(player, status, arenaZ)
-	if not isValidPlayer(player) then
-		return
-	end
-
+	if not isValidPlayer(player) then return end
 	local character = player.Character
-	if not character then
-		return
-	end
-
+	if not character then return end
 	character:SetAttribute("InMatch", status == true)
-
 	if status then
 		character:SetAttribute("ArenaZ", arenaZ)
 	else
@@ -118,31 +126,27 @@ local function setInMatch(player, status, arenaZ)
 end
 
 local function setDuelPromptEnabled(player, enabled)
-	if not isValidPlayer(player) then
-		return
-	end
-
+	if not isValidPlayer(player) then return end
 	local character = player.Character
 	local root = character and character:FindFirstChild("HumanoidRootPart")
 	local prompt = root and root:FindFirstChild("DuelChallengePrompt")
-
 	if prompt and prompt:IsA("ProximityPrompt") then
 		prompt.Enabled = enabled
 	end
 end
 
 local function stopDummy(dummyClone)
-	if not dummyClone or not dummyClone.Parent then
-		return
-	end
-
+	if not dummyClone or not dummyClone.Parent then return end
 	dummyClone:SetAttribute("InMatch", false)
-
+	dummyClone:SetAttribute("AttackActiveUntil", 0)
+	dummyClone:SetAttribute("IsBlocking", false)
+	dummyClone:SetAttribute("IsParrying", false)
 	local humanoid = dummyClone:FindFirstChildOfClass("Humanoid")
 	if humanoid then
 		humanoid.WalkSpeed = 0
 		humanoid.JumpPower = 0
 		humanoid.AutoRotate = false
+		humanoid:Move(Vector3.zero, false)
 	end
 end
 
@@ -158,26 +162,24 @@ local function disconnectBattleConnections(battle)
 	safeDisconnect(battle.dummyDiedConn)
 	safeDisconnect(battle.playerDiedConn)
 	safeDisconnect(battle.characterRemovingConn)
-
 	battle.heartbeatConn = nil
 	battle.dummyDiedConn = nil
 	battle.playerDiedConn = nil
 	battle.characterRemovingConn = nil
+	if battle.aiController then
+		battle.aiController:Destroy()
+		battle.aiController = nil
+	end
 end
 
 local function unlockBattleArena(battle)
-	if not battle.arenaLocked or not battle.arenaName then
-		return
-	end
-
+	if not battle.arenaLocked or not battle.arenaName then return end
 	battle.arenaLocked = false
 	safeMatchManagerCall("UnlockArena", battle.arenaName)
 end
 
 local function fireBattleResult(player, winnerIsPlayer)
-	if not isValidPlayer(player) then
-		return
-	end
+	if not isValidPlayer(player) then return end
 
 	if winnerIsPlayer == true then
 		MatchFinishRemote:FireClient(player, {
@@ -185,40 +187,28 @@ local function fireBattleResult(player, winnerIsPlayer)
 			Loser = "Training Dummy",
 			IsDraw = false,
 		})
-
-		-- Dummy battles are private, so do not broadcast this to every server player.
-		CombatJuice.EmitTo(player, "Victory", {
-			winner = player.Name,
-			loser = "Training Dummy",
-		})
+		CombatJuice.EmitTo(player, "Victory", {winner = player.Name, loser = "Training Dummy"})
 	elseif winnerIsPlayer == false then
 		MatchFinishRemote:FireClient(player, {
 			Winner = "Training Dummy",
 			Loser = player.Name,
 			IsDraw = false,
 		})
-
-		CombatJuice.EmitTo(player, "Victory", {
-			winner = "Training Dummy",
-			loser = player.Name,
-		})
+		CombatJuice.EmitTo(player, "Victory", {winner = "Training Dummy", loser = player.Name})
 	else
-		MatchFinishRemote:FireClient(player, {
-			Winner = "Draw",
-			Loser = "Draw",
-			IsDraw = true,
-		})
-
+		MatchFinishRemote:FireClient(player, {Winner = "Draw", Loser = "Draw", IsDraw = true})
 		CombatJuice.EmitTo(player, "Draw", {})
 	end
 end
 
 local function endDummyBattle(player, battle, winnerIsPlayer)
-	if battle.finished then
-		return
-	end
-
+	if battle.finished then return end
 	battle.finished = true
+
+	if battle.dummyLevel == 10 and battle.aiMemory and winnerIsPlayer ~= nil then
+		-- This is intentionally never sent to the client. Level 10 learns silently.
+		TrainingDummyAI.RecordRoundResult(battle.aiMemory, winnerIsPlayer == true)
+	end
 
 	if activeDummyBattles[player] == battle then
 		activeDummyBattles[player] = nil
@@ -227,9 +217,6 @@ local function endDummyBattle(player, battle, winnerIsPlayer)
 	disconnectBattleConnections(battle)
 	stopDummy(battle.dummyClone)
 
-	-- Stop the player being treated as an active combatant immediately.
-	-- Do not call DamageHandler.SetMatchOver() here because its state is global
-	-- in the current DamageHandler and would stop unrelated arena matches too.
 	if isValidPlayer(player) then
 		setInMatch(player, false)
 		setDuelPromptEnabled(player, false)
@@ -237,7 +224,6 @@ local function endDummyBattle(player, battle, winnerIsPlayer)
 
 	fireBattleResult(player, winnerIsPlayer)
 	task.wait(RESULT_DISPLAY_TIME)
-
 	destroyBattleDummy(battle)
 	unlockBattleArena(battle)
 
@@ -249,7 +235,6 @@ local function endDummyBattle(player, battle, winnerIsPlayer)
 		local reloadSuccess, reloadError = pcall(function()
 			player:LoadCharacterAsync()
 		end)
-
 		if not reloadSuccess and isValidPlayer(player) then
 			warn("[DummyBattleServer] Failed to reload " .. player.Name .. ": " .. tostring(reloadError))
 		end
@@ -261,53 +246,37 @@ local function startDummyBattle(player, arenaReference)
 		warn("[DummyBattleServer] Tried to start a dummy battle for an invalid player")
 		return false
 	end
-
-	if activeDummyBattles[player] then
-		warn("[DummyBattleServer] " .. player.Name .. " is already in a dummy battle")
-		return false
-	end
+	if activeDummyBattles[player] then return false end
 
 	local success, isAlreadyInMatch = safeMatchManagerCall("IsPlayerInMatch", player)
-	if not success or isAlreadyInMatch then
-		return false
-	end
+	if not success or isAlreadyInMatch then return false end
 
 	local character = player.Character
 	local playerHumanoid = character and character:FindFirstChildOfClass("Humanoid")
 	local playerRoot = character and character:FindFirstChild("HumanoidRootPart")
-
 	if not character or not playerHumanoid or not playerRoot or playerHumanoid.Health <= 0 then
 		warn("[DummyBattleServer] " .. player.Name .. " has no usable character")
 		return false
 	end
-
-	if character:GetAttribute("InMatch") then
-		warn("[DummyBattleServer] " .. player.Name .. " already has InMatch enabled")
-		return false
-	end
+	if character:GetAttribute("InMatch") then return false end
 
 	local arena = resolveArena(arenaReference)
 	if not arena then
 		warn("[DummyBattleServer] No available arena was found")
 		return false
 	end
-
 	local spawn1 = findSpawn(arena, "ArenaSpawn1")
 	local spawn2 = findSpawn(arena, "ArenaSpawn2")
-
 	if not spawn1 or not spawn2 then
-		warn(string.format(
-			"[DummyBattleServer] Arena %s is missing ArenaSpawn1 or ArenaSpawn2",
-			arena.Name
-			))
+		warn("[DummyBattleServer] Arena " .. arena.Name .. " is missing ArenaSpawn1 or ArenaSpawn2")
 		return false
 	end
 
-	-- Build and validate the clone before locking the arena.
+	local _, preferredLevel, aiMemory = getTrainingProfile(player)
+
 	local cloneSuccess, dummyClone = pcall(function()
 		return TrainingDummy:Clone()
 	end)
-
 	if not cloneSuccess or not dummyClone then
 		warn("[DummyBattleServer] Could not clone the training dummy")
 		return false
@@ -317,40 +286,32 @@ local function startDummyBattle(player, arenaReference)
 	dummyClone:SetAttribute("IsTrainingDummy", true)
 	dummyClone:SetAttribute("InMatch", true)
 	dummyClone:SetAttribute("ArenaZ", spawn2.Position.Z)
+	dummyClone:SetAttribute("TrainingLevel", preferredLevel)
 
 	local dummyHumanoid = dummyClone:FindFirstChildOfClass("Humanoid")
 	local dummyRoot = dummyClone:FindFirstChild("HumanoidRootPart")
-
 	if not dummyHumanoid or not dummyRoot then
 		dummyClone:Destroy()
 		warn("[DummyBattleServer] The training dummy needs a Humanoid and HumanoidRootPart")
 		return false
 	end
 
-	-- Remove cloned prompts. The arena dummy should not start another vote.
+	-- The lobby dummy contains its legacy combat brain. The arena clone is controlled
+	-- exclusively by TrainingDummyCombatAI so Level 0 can truly do absolutely nothing
+	-- and higher levels never have two AIs issuing conflicting actions.
 	for _, descendant in ipairs(dummyClone:GetDescendants()) do
 		if descendant:IsA("ProximityPrompt") then
 			descendant:Destroy()
+		elseif descendant:IsA("Script") or descendant:IsA("LocalScript") then
+			descendant.Disabled = true
 		end
-	end
-
-	-- A LocalScript named Animate cannot run for a server-created NPC.
-	local animate = dummyClone:FindFirstChild("Animate")
-	if animate and animate:IsA("LocalScript") then
-		animate:Destroy()
-	end
-
-	-- Remove the lobby idle animation loop so the battle clone doesn't play it.
-	local idleAnimLoop = dummyClone:FindFirstChild("IdleAnimLoop")
-	if idleAnimLoop and idleAnimLoop:IsA("Script") then
-		idleAnimLoop:Destroy()
 	end
 
 	dummyHumanoid.MaxHealth = 100
 	dummyHumanoid.Health = 100
-	dummyHumanoid.WalkSpeed = 16
-	dummyHumanoid.JumpPower = 50
-	dummyHumanoid.AutoRotate = true
+	dummyHumanoid.WalkSpeed = 0
+	dummyHumanoid.JumpPower = 0
+	dummyHumanoid.AutoRotate = false
 	dummyClone.PrimaryPart = dummyRoot
 
 	local lockSuccess, lockResult = safeMatchManagerCall("LockArena", arena.Name)
@@ -365,6 +326,9 @@ local function startDummyBattle(player, arenaReference)
 		arenaLocked = true,
 		dummyClone = dummyClone,
 		dummyHumanoid = dummyHumanoid,
+		dummyLevel = preferredLevel,
+		aiMemory = aiMemory,
+		aiController = nil,
 		finished = false,
 		infiniteHealth = false,
 		spawn1 = spawn1,
@@ -373,24 +337,19 @@ local function startDummyBattle(player, arenaReference)
 		dummyDiedConn = nil,
 		playerDiedConn = nil,
 		characterRemovingConn = nil,
-		matchStartTime = os.clock(),
-		lastTimerSent = 0,
+		lastHudSent = 0,
+		lastPlayerHealth = nil,
+		lastDummyHealth = nil,
 	}
-
-	-- IMPORTANT: reserve the battle before connecting events or starting Heartbeat.
-	-- Otherwise an immediate death can call endDummyBattle before this table exists.
 	activeDummyBattles[player] = battle
 
 	safeMatchManagerCall("SetPlayerState", player, "InMatch")
 	setInMatch(player, true, spawn1.Position.Z)
 	setDuelPromptEnabled(player, false)
-
 	DamageHandler.InitializePlayerHealth(player)
 	playerHumanoid.Health = playerHumanoid.MaxHealth
 
 	dummyClone.Parent = workspace
-
-	-- Keep NPC physics authoritative on the server.
 	for _, descendant in ipairs(dummyClone:GetDescendants()) do
 		if descendant:IsA("BasePart") and not descendant.Anchored then
 			pcall(function()
@@ -401,126 +360,94 @@ local function startDummyBattle(player, arenaReference)
 
 	local playerTarget = spawn1.CFrame + Vector3.new(0, spawn1.Size.Y / 2 + 3, 0)
 	local dummyTarget = spawn2.CFrame + Vector3.new(0, spawn2.Size.Y / 2 + 3, 0)
-
 	character:PivotTo(playerTarget)
 	dummyClone:PivotTo(dummyTarget)
 
-	local function endBattle(winnerIsPlayer)
-		if battle.finished then
-			return
-		end
+	local aiSuccess, aiController = pcall(function()
+		return TrainingDummyCombatAI.new(player, battle, preferredLevel, aiMemory)
+	end)
+	if aiSuccess then
+		battle.aiController = aiController
+	else
+		warn("[DummyBattleServer] Training AI failed to start: " .. tostring(aiController))
+		battle.dummyLevel = 0
+		dummyClone:SetAttribute("TrainingLevel", 0)
+	end
 
-		endDummyBattle(player, battle, winnerIsPlayer)
+	local function endBattle(winnerIsPlayer)
+		if not battle.finished then
+			endDummyBattle(player, battle, winnerIsPlayer)
+		end
 	end
 
 	battle.dummyDiedConn = dummyHumanoid.Died:Connect(function()
 		endBattle(true)
 	end)
-
 	battle.playerDiedConn = playerHumanoid.Died:Connect(function()
 		endBattle(false)
 	end)
-
 	battle.characterRemovingConn = player.CharacterRemoving:Connect(function(removingCharacter)
-		if removingCharacter == character then
-			endBattle(false)
-		end
+		if removingCharacter == character then endBattle(false) end
 	end)
 
 	battle.heartbeatConn = RunService.Heartbeat:Connect(function()
-		if battle.finished then
-			return
-		end
-
-		if not isValidPlayer(player) then
-			endBattle(nil)
-			return
-		end
-
-		if player.Character ~= character or not character.Parent then
-			endBattle(false)
-			return
-		end
-
-		if not dummyClone.Parent or not dummyHumanoid.Parent then
-			endBattle(true)
-			return
-		end
+		if battle.finished then return end
+		if not isValidPlayer(player) then endBattle(nil) return end
+		if player.Character ~= character or not character.Parent then endBattle(false) return end
+		if not dummyClone.Parent or not dummyHumanoid.Parent then endBattle(true) return end
 
 		local playerHealth = DamageHandler.GetPlayerHealth(player)
-		if type(playerHealth) ~= "number" then
-			playerHealth = 0
-		end
-
+		if type(playerHealth) ~= "number" then playerHealth = 0 end
 		if battle.infiniteHealth then
 			DamageHandler.SetPlayerHealth(player, 100)
 			playerHealth = 100
 		end
-
 		local dummyHealth = math.max(0, dummyHumanoid.Health)
-		local intensity = math.clamp((200 - playerHealth - dummyHealth) / 150, 0, 1)
 
-		safeFireClient(player, "UpdateHealth", {
-			Health = playerHealth,
-			OpponentHealth = dummyHealth,
-		})
-
-		CombatJuice.EmitTo(player, "MusicIntensity", {
-			intensity = intensity,
-		})
-
-		if playerHealth <= 0 then
-			endBattle(false)
-			return
-		end
-
-		if dummyHealth <= 0 then
-			endBattle(true)
-			return
-		end
+		if playerHealth <= 0 then endBattle(false) return end
+		if dummyHealth <= 0 then endBattle(true) return end
 
 		local now = os.clock()
-		local elapsed = now - battle.matchStartTime
-		local remaining = math.max(0, MATCH_DURATION - elapsed)
-
-		if now - battle.lastTimerSent >= 0.1 then
-			battle.lastTimerSent = now
-			safeFireClient(player, "UpdateTimer", {
-				Time = remaining,
-			})
-		end
-
-		if remaining <= 0 then
-			if playerHealth > dummyHealth then
-				endBattle(true)
-			elseif dummyHealth > playerHealth then
-				endBattle(false)
-			else
-				endBattle(nil)
-			end
+		if now - battle.lastHudSent >= HUD_UPDATE_INTERVAL
+			or playerHealth ~= battle.lastPlayerHealth
+			or dummyHealth ~= battle.lastDummyHealth then
+			battle.lastHudSent = now
+			battle.lastPlayerHealth = playerHealth
+			battle.lastDummyHealth = dummyHealth
+			safeFireClient(player, "UpdateHealth", {Health = playerHealth, OpponentHealth = dummyHealth})
+			local intensity = math.clamp((200 - playerHealth - dummyHealth) / 150, 0, 1)
+			CombatJuice.EmitTo(player, "MusicIntensity", {intensity = intensity})
 		end
 	end)
 
+	-- Training is intentionally untimed. MatchDuration=0 is only a compatibility
+	-- value for older HUD code; TrainingNoTimer tells the enhancer to hide the timer.
 	safeFireClient(player, "InMatch", {
 		OpponentName = "Training Dummy",
 		OpponentUserId = 0,
 		PlayerUserId = player.UserId,
 		ArenaName = arena.Name,
-		MatchDuration = MATCH_DURATION,
+		MatchDuration = 0,
+		TrainingNoTimer = true,
+		DummyLevel = battle.dummyLevel,
 	})
 
-	-- Battle intro sequence (plays intro music via MatchAudioManager).
 	safeFireClient(player, "BattleIntro", {
 		p1 = {Name = player.Name, UserId = player.UserId},
 		p2 = {Name = "Training Dummy", UserId = 0},
 	})
-
 	task.wait(2.5)
 
 	safeFireClient(player, "Fighting", {
 		OpponentName = "Training Dummy",
 		OpponentUserId = 0,
-		MatchDuration = MATCH_DURATION,
+		MatchDuration = 0,
+		TrainingNoTimer = true,
+		DummyLevel = battle.dummyLevel,
+	})
+	safeFireClient(player, "TrainingControlsSync", {
+		InfiniteHealth = battle.infiniteHealth,
+		DummyLevel = battle.dummyLevel,
 	})
 
 	CombatJuice.EmitTo(player, "Intro", {
@@ -531,29 +458,20 @@ local function startDummyBattle(player, arenaReference)
 		scythe = "Reaper",
 	})
 
-	print(string.format(
-		"[DummyBattleServer] Started %s vs Training Dummy in %s",
-		player.Name,
-		arena.Name
-		))
-
+	print(string.format("[DummyBattleServer] Started %s vs Training Dummy L%d in %s (untimed)",
+		player.Name, battle.dummyLevel, arena.Name))
 	return true
 end
 
--- MatchManager assigns the first available arena directly.
 _G.StartDummyBattle = startDummyBattle
 _G.GetActiveDummyBattle = function(player)
 	local battle = activeDummyBattles[player]
-	if not battle or battle.finished then
-		return nil
-	end
+	if not battle or battle.finished then return nil end
 	return battle
 end
 _G.EndDummyBattle = function(player)
 	local battle = activeDummyBattles[player]
-	if not battle or battle.finished then
-		return false
-	end
+	if not battle or battle.finished then return false end
 	endDummyBattle(player, battle, nil)
 	return true
 end
@@ -564,11 +482,8 @@ local function setupDummyPrompt()
 		warn("[DummyBattleServer] Training dummy has no HumanoidRootPart")
 		return
 	end
-
 	local oldPrompt = root:FindFirstChild("DummyChallengePrompt")
-	if oldPrompt then
-		oldPrompt:Destroy()
-	end
+	if oldPrompt then oldPrompt:Destroy() end
 
 	local prompt = Instance.new("ProximityPrompt")
 	prompt.Name = "DummyChallengePrompt"
@@ -581,30 +496,16 @@ local function setupDummyPrompt()
 	prompt.Parent = root
 
 	prompt.Triggered:Connect(function(player)
-		if not isValidPlayer(player) then
-			return
-		end
-
-		if activeDummyBattles[player] then
-			return
-		end
-
+		if not isValidPlayer(player) or activeDummyBattles[player] then return end
 		local checkSuccess, isInMatch = safeMatchManagerCall("IsPlayerInMatch", player)
-		if not checkSuccess or isInMatch then
-			return
-		end
-
+		if not checkSuccess or isInMatch then return end
 		local character = player.Character
-		if not character or character:GetAttribute("InMatch") then
-			return
-		end
-
+		if not character or character:GetAttribute("InMatch") then return end
 		local voteSuccess = safeMatchManagerCall("StartMapVote", player, {
 			Name = "Training Dummy",
 			UserId = 0,
 			IsDummy = true,
 		})
-
 		if not voteSuccess then
 			warn("[DummyBattleServer] Could not start the dummy map vote for " .. player.Name)
 		end
@@ -615,58 +516,54 @@ setupDummyPrompt()
 
 local function getActiveBattle(player)
 	local battle = activeDummyBattles[player]
-	if not battle or battle.finished then
-		return nil
-	end
+	if not battle or battle.finished then return nil end
 	return battle
 end
 
 SetInfiniteHealthRemote.OnServerEvent:Connect(function(player, enabled)
-	if not isValidPlayer(player) then
-		return
-	end
-
+	if not isValidPlayer(player) then return end
 	local battle = getActiveBattle(player)
-	if not battle then
-		return
-	end
-
+	if not battle then return end
 	battle.infiniteHealth = enabled == true
-
-	if battle.infiniteHealth then
-		DamageHandler.SetPlayerHealth(player, 100)
-	end
-
+	if battle.infiniteHealth then DamageHandler.SetPlayerHealth(player, 100) end
 	safeFireClient(player, "TrainingControlsSync", {
 		InfiniteHealth = battle.infiniteHealth,
+		DummyLevel = battle.dummyLevel,
+	})
+end)
+
+SetDummyLevelRemote.OnServerEvent:Connect(function(player, requestedLevel)
+	if not isValidPlayer(player) then return end
+	local battle = getActiveBattle(player)
+	if not battle then return end
+
+	local level = TrainingDummyAI.ClampLevel(requestedLevel)
+	battle.dummyLevel = level
+	battle.dummyClone:SetAttribute("TrainingLevel", level)
+	if battle.aiController then
+		battle.aiController:SetLevel(level)
+	end
+	savePreferredLevel(player, level)
+
+	-- Only the selected level is synchronized. Adaptive memory/counters never leave the server.
+	safeFireClient(player, "TrainingControlsSync", {
+		InfiniteHealth = battle.infiniteHealth,
+		DummyLevel = level,
 	})
 end)
 
 RespawnDummyRemote.OnServerEvent:Connect(function(player)
-	if not isValidPlayer(player) then
-		return
-	end
-
+	if not isValidPlayer(player) then return end
 	local battle = getActiveBattle(player)
-	if not battle then
-		return
-	end
-
+	if not battle then return end
 	local dummyClone = battle.dummyClone
 	local dummyHumanoid = battle.dummyHumanoid
 	local spawn2 = battle.spawn2
-
-	if not dummyClone or not dummyClone.Parent or not dummyHumanoid or not dummyHumanoid.Parent or not spawn2 then
-		return
-	end
-
-	if dummyHumanoid.Health <= 0 then
-		return
-	end
+	if not dummyClone or not dummyClone.Parent or not dummyHumanoid or not dummyHumanoid.Parent or not spawn2 then return end
+	if dummyHumanoid.Health <= 0 then return end
 
 	dummyHumanoid.Health = dummyHumanoid.MaxHealth
 	dummyClone:PivotTo(spawn2.CFrame + Vector3.new(0, spawn2.Size.Y / 2 + 3, 0))
-
 	local root = dummyClone:FindFirstChild("HumanoidRootPart")
 	if root and root:IsA("BasePart") then
 		root.AssemblyLinearVelocity = Vector3.zero
@@ -675,27 +572,16 @@ RespawnDummyRemote.OnServerEvent:Connect(function(player)
 end)
 
 ReturnToLobbyRemote.OnServerEvent:Connect(function(player)
-	if not isValidPlayer(player) then
-		return
-	end
-
+	if not isValidPlayer(player) then return end
 	local battle = getActiveBattle(player)
-	if not battle then
-		return
-	end
-
-	endDummyBattle(player, battle, nil)
+	if battle then endDummyBattle(player, battle, nil) end
 end)
 
 Players.PlayerRemoving:Connect(function(player)
 	local battle = activeDummyBattles[player]
-	if not battle then
-		return
-	end
-
+	if not battle then return end
 	battle.finished = true
 	activeDummyBattles[player] = nil
-
 	disconnectBattleConnections(battle)
 	destroyBattleDummy(battle)
 	unlockBattleArena(battle)
