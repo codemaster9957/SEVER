@@ -1,4 +1,3 @@
---!strict
 -- Adds the training dummy level setting without redesigning the existing UI.
 -- It clones a live training settings button so all authored styling is inherited exactly.
 
@@ -9,88 +8,105 @@ local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
 
 local MatchEvents = ReplicatedStorage:WaitForChild("MatchEvents")
-local GameStateUpdate = MatchEvents:WaitForChild("GameStateUpdate") :: RemoteEvent
+local GameStateUpdate = MatchEvents:WaitForChild("GameStateUpdate")
 local TrainingControls = MatchEvents:WaitForChild("TrainingDummyControls")
-local SetDummyLevel = TrainingControls:WaitForChild("SetDummyLevel") :: RemoteEvent
+local SetDummyLevel = TrainingControls:WaitForChild("SetDummyLevel")
 
 local inTraining = false
 local currentLevel = 1
-local levelButton: GuiButton? = nil
-local hiddenTimerState: {[GuiObject]: boolean} = {}
+local levelButton = nil
+local hiddenTimerState = {}
 
-local function lower(value: string): string
-	return string.lower(value)
+local function lower(value)
+	return string.lower(tostring(value or ""))
 end
 
-local function visibleText(instance: Instance): string
+local function visibleText(instance)
 	if instance:IsA("TextButton") or instance:IsA("TextLabel") then
 		return instance.Text
 	end
 	for _, descendant in ipairs(instance:GetDescendants()) do
-		if descendant:IsA("TextButton") or descendant:IsA("TextLabel") then
-			if descendant.Text ~= "" then
-				return descendant.Text
-			end
+		if (descendant:IsA("TextButton") or descendant:IsA("TextLabel")) and descendant.Text ~= "" then
+			return descendant.Text
 		end
 	end
 	return ""
 end
 
-local function looksLikeTrainingControl(button: GuiButton): boolean
-	local text = lower(visibleText(button))
-	local name = lower(button.Name)
-	local combined = name .. " " .. text
+local function hasNamedAncestor(instance, keywords)
+	local current = instance.Parent
+	while current and current ~= playerGui do
+		local name = lower(current.Name)
+		for _, keyword in ipairs(keywords) do
+			if string.find(name, keyword, 1, true) then
+				return true
+			end
+		end
+		current = current.Parent
+	end
+	return false
+end
+
+local function looksLikeTrainingControl(button)
+	if button:GetAttribute("SEVERTrainingLevelControl") == true then
+		return false
+	end
+	local combined = lower(button.Name .. " " .. visibleText(button))
 	return string.find(combined, "respawn", 1, true) ~= nil
 		or string.find(combined, "infinite", 1, true) ~= nil
 		or string.find(combined, "return", 1, true) ~= nil
 		or string.find(combined, "lobby", 1, true) ~= nil
 end
 
-local function findTemplateButton(): GuiButton?
-	local preferred: GuiButton? = nil
+local function findTemplateButton()
+	local preferred = nil
+	local fallback = nil
 	for _, descendant in ipairs(playerGui:GetDescendants()) do
-		if descendant:IsA("GuiButton") and descendant.Visible and looksLikeTrainingControl(descendant) then
-			local text = lower(visibleText(descendant))
-			if string.find(text, "respawn", 1, true) then
-				return descendant
+		if descendant:IsA("GuiButton") and descendant.Visible then
+			if looksLikeTrainingControl(descendant) then
+				local text = lower(visibleText(descendant))
+				if string.find(text, "respawn", 1, true) then
+					return descendant
+				end
+				preferred = preferred or descendant
+			elseif hasNamedAncestor(descendant, {"training", "dummy"}) then
+				fallback = fallback or descendant
 			end
-			preferred = preferred or descendant
 		end
 	end
-	return preferred
+	return preferred or fallback
 end
 
-local function setButtonLabel(button: GuiButton)
+local function setButtonLabel(button)
 	local labelText = string.format("DUMMY LEVEL: %d", currentLevel)
 	if button:IsA("TextButton") and button.Text ~= "" then
 		button.Text = labelText
 		return
 	end
 
-	local bestLabel: TextLabel? = nil
+	local firstTextLabel = nil
 	for _, descendant in ipairs(button:GetDescendants()) do
 		if descendant:IsA("TextLabel") and descendant.Text ~= "" then
+			firstTextLabel = firstTextLabel or descendant
 			local text = lower(descendant.Text)
 			if string.find(text, "respawn", 1, true)
 				or string.find(text, "infinite", 1, true)
 				or string.find(text, "return", 1, true)
 				or string.find(text, "lobby", 1, true) then
-				bestLabel = descendant
-				break
+				descendant.Text = labelText
+				return
 			end
-			bestLabel = bestLabel or descendant
 		end
 	end
-	if bestLabel then
-		bestLabel.Text = labelText
+	if firstTextLabel then
+		firstTextLabel.Text = labelText
 	end
 end
 
-local function placeCloneAfterTemplate(clone: GuiButton, template: GuiButton)
+local function placeCloneAfterTemplate(clone, template)
 	clone.LayoutOrder = template.LayoutOrder + 1
 	local parent = template.Parent
 	if not parent then return end
-
 	local usesLayout = parent:FindFirstChildOfClass("UIListLayout") ~= nil
 		or parent:FindFirstChildOfClass("UIGridLayout") ~= nil
 		or parent:FindFirstChildOfClass("UITableLayout") ~= nil
@@ -112,6 +128,14 @@ local function ensureLevelButton()
 	local clone = template:Clone()
 	clone.Name = "TrainingDummyLevelButton"
 	clone:SetAttribute("SEVERTrainingLevelControl", true)
+
+	-- Never inherit button-specific LocalScripts from Respawn/Return controls.
+	for _, descendant in ipairs(clone:GetDescendants()) do
+		if descendant:IsA("LocalScript") or descendant:IsA("Script") then
+			descendant:Destroy()
+		end
+	end
+
 	placeCloneAfterTemplate(clone, template)
 	clone.Parent = template.Parent
 	levelButton = clone
@@ -125,27 +149,20 @@ local function ensureLevelButton()
 	end)
 end
 
-local function isBattleTimerObject(gui: GuiObject): boolean
-	local name = lower(gui.Name)
-	if string.find(name, "timer", 1, true) ~= nil then
-		return true
+local function isBattleTimerObject(gui)
+	local isNamedTimer = string.find(lower(gui.Name), "timer", 1, true) ~= nil
+	local isClockText = false
+	if gui:IsA("TextLabel") or gui:IsA("TextButton") then
+		isClockText = string.match(gui.Text, "^%d+:%d%d$") ~= nil
 	end
 
-	if gui:IsA("TextLabel") or gui:IsA("TextButton") then
-		local text = gui.Text
-		if string.match(text, "^%d+:%d%d$") then
-			local current: Instance? = gui.Parent
-			while current and current ~= playerGui do
-				local ancestorName = lower(current.Name)
-				if string.find(ancestorName, "battle", 1, true)
-					or string.find(ancestorName, "match", 1, true) then
-					return true
-				end
-				current = current.Parent
-			end
-		end
+	if not isNamedTimer and not isClockText then
+		return false
 	end
-	return false
+
+	-- Do not hide ability cooldown timers. Only touch timer elements that live under
+	-- the actual battle/match HUD hierarchy.
+	return hasNamedAncestor(gui, {"battle", "match"})
 end
 
 local function hideTrainingTimers()
@@ -213,8 +230,6 @@ playerGui.DescendantAdded:Connect(function(descendant)
 	end)
 end)
 
--- Existing UI scripts may rebuild controls or set timer visibility after state changes.
--- A light watchdog keeps the cloned control and training-only timer state consistent.
 task.spawn(function()
 	while true do
 		task.wait(0.35)
