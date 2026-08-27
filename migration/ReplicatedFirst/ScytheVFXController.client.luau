@@ -9,6 +9,9 @@ local RunService = game:GetService("RunService")
 local LocalPlayer = Players.LocalPlayer
 local VFXEvent = ReplicatedStorage:WaitForChild("ScytheVFXEvent") :: RemoteEvent
 local SlashTemplate = ReplicatedStorage:WaitForChild("scythe slash (NEW)")
+local SpinTemplate = ReplicatedStorage:FindFirstChild("vfx for spin")
+local ThrowFolder = ReplicatedStorage:FindFirstChild("throwing vfx")
+local SoulReapFolder = ReplicatedStorage:FindFirstChild("soul reap vfx")
 
 local SLASH_FOLLOW_TIME = 0.34
 local SLASH_MIN_LIFETIME = 0.65
@@ -160,6 +163,42 @@ local function startAuthoredEmitters(root: Instance)
 			descendant:Emit(count)
 		end
 	end
+end
+
+local function followAuthoredEffect(template: Instance, character: Model, effectName: string, followTime: number, offset: CFrame?)
+	local targetCFrame = getSlashTargetCFrame(character)
+	if not targetCFrame then return end
+
+	local effect = template:Clone()
+	effect.Name = effectName
+	effect.Parent = workspace
+	local driver = makeDriver(effect, true)
+	if not driver then
+		effect:Destroy()
+		return
+	end
+
+	local appliedOffset = offset or CFrame.identity
+	driver.apply(targetCFrame * appliedOffset)
+	startAuthoredEmitters(effect)
+
+	local connection
+	local startedAt = os.clock()
+	connection = RunService.RenderStepped:Connect(function()
+		if not effect.Parent or not character.Parent or os.clock() - startedAt >= followTime then
+			connection:Disconnect()
+			return
+		end
+		local currentTarget = getSlashTargetCFrame(character)
+		if currentTarget then
+			driver.apply(currentTarget * appliedOffset)
+		end
+	end)
+
+	task.delay(math.max(authoredLifetime(effect), followTime + 0.25), function()
+		if connection and connection.Connected then connection:Disconnect() end
+		if effect.Parent then effect:Destroy() end
+	end)
 end
 
 local function playSlash(character: Model)
@@ -353,14 +392,97 @@ RunService:BindToRenderStep("SEVER_FrisbeeThrowVFX", Enum.RenderPriority.Last.Va
 	end
 end)
 
-VFXEvent.OnClientEvent:Connect(function(action, userId)
-	if action ~= "Slash" or typeof(userId) ~= "number" then
+local function findFirstVisual(container: Instance?, preferredName: string): Instance?
+	if not container then return nil end
+	local preferred = container:FindFirstChild(preferredName)
+	if preferred then return preferred end
+	for _, child in ipairs(container:GetChildren()) do
+		if #collectParts(child) > 0 then
+			return child
+		end
+	end
+	return nil
+end
+
+local function playNPCThrow(character: Model, directionSign: number, travelTime: number)
+	local template = findFirstVisual(ThrowFolder, "throwing vfx")
+	local root = character:FindFirstChild("HumanoidRootPart")
+	if not template or not root or not root:IsA("BasePart") then return end
+
+	local effect = template:Clone()
+	effect.Name = "training throwing vfx"
+	effect.Parent = workspace
+	local driver = makeDriver(effect, true)
+	if not driver then
+		effect:Destroy()
+		return
+	end
+	startAuthoredEmitters(effect)
+
+	local sign = directionSign >= 0 and 1 or -1
+	local duration = math.clamp(travelTime, 0.09, 0.5)
+	local startPosition = root.Position + Vector3.new(sign * 2.5, 1.2, 0)
+	local startedAt = os.clock()
+	local connection
+	connection = RunService.RenderStepped:Connect(function()
+		if not effect.Parent or not character.Parent then
+			connection:Disconnect()
+			return
+		end
+		local elapsed = os.clock() - startedAt
+		local position = startPosition + Vector3.new(sign * 95 * elapsed, 0, 0)
+		local base = CFrame.lookAt(position, position + Vector3.new(sign, 0, 0), Vector3.yAxis)
+		driver.apply(base * THROW_FLATTEN_ROTATION)
+		if elapsed >= duration then
+			connection:Disconnect()
+		end
+	end)
+
+	task.delay(duration + 0.65, function()
+		if connection and connection.Connected then connection:Disconnect() end
+		if effect.Parent then effect:Destroy() end
+	end)
+end
+
+local function playNPCSpin(character: Model)
+	if SpinTemplate then
+		followAuthoredEffect(SpinTemplate, character, "SEVER_TrainingSpinVFX", 0.72)
+	end
+end
+
+local function playNPCSoulReap(character: Model)
+	local template = findFirstVisual(SoulReapFolder, "soul reap dash trail")
+	if template then
+		followAuthoredEffect(template, character, "SEVER_TrainingSoulReapVFX", 0.48)
+	end
+end
+
+VFXEvent.OnClientEvent:Connect(function(action, subject, extraA, extraB)
+	if action == "Slash" then
+		if typeof(subject) ~= "number" then return end
+		local player = Players:GetPlayerByUserId(subject)
+		local character = player and player.Character
+		if character then
+			requestSlash(subject, character)
+		end
 		return
 	end
 
-	local player = Players:GetPlayerByUserId(userId)
-	local character = player and player.Character
-	if character then
-		requestSlash(userId, character)
+	if typeof(subject) ~= "Instance" or not subject:IsA("Model") then
+		return
+	end
+	local character = subject :: Model
+	if character:GetAttribute("IsTrainingDummy") ~= true then
+		return
+	end
+
+	if action == "NPCSlash" then
+		playSlash(character)
+	elseif action == "NPCThrow" and typeof(extraA) == "number" and typeof(extraB) == "number" then
+		playNPCThrow(character, extraA, extraB)
+	elseif action == "NPCSpin" then
+		playNPCSpin(character)
+	elseif action == "NPCSoulReap" then
+		playNPCSoulReap(character)
 	end
 end)
