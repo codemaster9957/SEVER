@@ -14,6 +14,7 @@ local profiles = {}
 local profileLoaded = {}
 local profileLoadFailed = {}
 local profileSaveBlocked = {}
+local loadingProfiles = {}
 local saving = {}
 
 local DEFAULT_PROFILE = {
@@ -96,20 +97,34 @@ local function installTemporaryStudioProfile(player)
 	return profile
 end
 
+local function waitForExistingLoad(player)
+	while loadingProfiles[player] and player.Parent == Players do
+		task.wait(0.05)
+	end
+	return profiles[player]
+end
+
 function DataService.LoadProfile(player)
-	if profiles[player] then
-		return profiles[player]
+	if profiles[player] then return profiles[player] end
+	if profileLoadFailed[player] then return nil end
+
+	-- Currency, ranked, winstreak and armour services may all ask for the profile on
+	-- PlayerAdded. Only one coroutine is allowed to perform GetAsync; everyone else
+	-- waits for and receives that exact same profile table.
+	if loadingProfiles[player] then
+		return waitForExistingLoad(player)
 	end
-	if profileLoadFailed[player] then
-		return nil
-	end
+	loadingProfiles[player] = true
 
 	local key = getKey(player)
 	local data = nil
 	local success = false
 
 	for attempt = 1, MAX_RETRIES do
-		if player.Parent ~= Players then return nil end
+		if player.Parent ~= Players then
+			loadingProfiles[player] = nil
+			return nil
+		end
 
 		local ok, result = pcall(function()
 			return dataStore:GetAsync(key)
@@ -121,20 +136,18 @@ function DataService.LoadProfile(player)
 		end
 
 		warn("[DataService] Load attempt " .. attempt .. " failed for " .. player.Name .. ": " .. tostring(result))
-		if attempt < MAX_RETRIES then
-			task.wait(2 ^ attempt)
-		end
+		if attempt < MAX_RETRIES then task.wait(2 ^ attempt) end
 	end
 
-	-- Never manufacture SAVEABLE default data after a failed read. In live servers
-	-- this fails closed. In Studio we may still need to test gameplay with API
-	-- access disabled, so use an explicitly non-saving temporary profile instead.
 	if not success then
 		if RunService:IsStudio() and player.Parent == Players then
-			return installTemporaryStudioProfile(player)
+			local profile = installTemporaryStudioProfile(player)
+			loadingProfiles[player] = nil
+			return profile
 		end
 
 		profileLoadFailed[player] = true
+		loadingProfiles[player] = nil
 		warn("[DataService] Refusing to create/save fallback data for " .. player.Name .. " because loading failed")
 		if player.Parent == Players then
 			player:Kick("Your data could not be loaded safely. Please rejoin in a moment.")
@@ -156,6 +169,7 @@ function DataService.LoadProfile(player)
 	profileLoaded[player] = true
 	profileLoadFailed[player] = nil
 	profileSaveBlocked[player] = nil
+	loadingProfiles[player] = nil
 	syncGoldDisplay(player, profile)
 	return profile
 end
@@ -168,9 +182,7 @@ function DataService.SaveProfile(player)
 		or profileSaveBlocked[player] then
 		return false
 	end
-	if saving[player] then
-		return false
-	end
+	if saving[player] then return false end
 
 	saving[player] = true
 	local key = getKey(player)
@@ -187,9 +199,7 @@ function DataService.SaveProfile(player)
 		end
 
 		warn("[DataService] Save attempt " .. attempt .. " failed for " .. player.Name .. ": " .. tostring(err))
-		if attempt < MAX_RETRIES then
-			task.wait(2 ^ attempt)
-		end
+		if attempt < MAX_RETRIES then task.wait(2 ^ attempt) end
 	end
 
 	saving[player] = nil
@@ -204,9 +214,7 @@ end
 
 function DataService.GetProfile(player)
 	if profileLoadFailed[player] then return nil end
-	if not profiles[player] then
-		return DataService.LoadProfile(player)
-	end
+	if not profiles[player] then return DataService.LoadProfile(player) end
 	return profiles[player]
 end
 
@@ -270,6 +278,7 @@ function DataService.UnloadProfile(player)
 	profileLoaded[player] = nil
 	profileLoadFailed[player] = nil
 	profileSaveBlocked[player] = nil
+	loadingProfiles[player] = nil
 	saving[player] = nil
 end
 
@@ -299,8 +308,8 @@ game:BindToClose(function()
 	for _, player in ipairs(Players:GetPlayers()) do
 		if profiles[player]
 			and profileLoaded[player]
-			and not profileLoadFailed[player]
-			and not profileSaveBlocked[player] then
+				and not profileLoadFailed[player]
+				and not profileSaveBlocked[player] then
 			DataService.SaveProfile(player)
 		end
 	end
