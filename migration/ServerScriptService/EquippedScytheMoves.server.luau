@@ -5,8 +5,10 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local ServerScriptService = game:GetService("ServerScriptService")
+local RunService = game:GetService("RunService")
 
 local MatchManager = require(ServerScriptService:WaitForChild("MatchManager"))
+local ScytheThrowPullPolicy = require(ServerScriptService:WaitForChild("ScytheThrowPullPolicy"))
 local DamageHandler = require(ReplicatedStorage:WaitForChild("DamageHandler"))
 local ScytheSystems = ReplicatedStorage:WaitForChild("ScytheSystems")
 local LoadoutPolicy = require(ScytheSystems:WaitForChild("LoadoutPolicy"))
@@ -27,11 +29,10 @@ local THROW_MIN_RETURN_DURATION = 0.12
 local THROW_MAX_RETURN_DURATION = 0.42
 
 local PULL_STOP_DISTANCE = 5
-local PULL_MIN_SPEED = 42
-local PULL_MAX_SPEED = 92
-local PULL_TICK = 1 / 30
+local PULL_MIN_SPEED = 70
+local PULL_MAX_SPEED = 130
 local PULL_VERTICAL_GAIN = 4
-local PULL_MAX_VERTICAL_SPEED = 14
+local PULL_MAX_VERTICAL_SPEED = 18
 
 local cooldowns: {[Player]: {[string]: number}} = {}
 
@@ -85,7 +86,7 @@ local function isValidTarget(player: Player, model: Model): boolean
 end
 
 local function findTargets(player: Player, parts: {BasePart}): {Model}
-	local seen: {[Model]: boolean} = {}
+	local seen: {[Model]: boolean = {}
 	local result = {}
 	for _, part in ipairs(parts) do
 		local model = part:FindFirstAncestorOfClass("Model")
@@ -183,8 +184,26 @@ local function pullCaughtTarget(player: Player, target: Model, duration: number)
 	local targetHumanoid, targetRoot = getLiveTargetState(target)
 	if not targetHumanoid or not targetRoot or targetRoot.Anchored then return end
 
-	setServerOwnership(targetRoot, true)
+	local targetPlayer = Players:GetPlayerFromCharacter(target)
+	local oldWalkSpeed = targetHumanoid.WalkSpeed
+	local oldJumpPower = targetHumanoid.JumpPower
+	local oldJumpHeight = targetHumanoid.JumpHeight
+	local oldAutoRotate = targetHumanoid.AutoRotate
 	local finishAt = os.clock() + duration
+
+	-- DamageHandler applies its normal outward knockback first. A hooked throw needs to
+	-- take control immediately, otherwise the short-range knockback can win the first frames.
+	targetRoot.AssemblyLinearVelocity = Vector3.zero
+	targetRoot.AssemblyAngularVelocity = Vector3.zero
+	targetHumanoid.WalkSpeed = 0
+	targetHumanoid.JumpPower = 0
+	targetHumanoid.JumpHeight = 0
+	targetHumanoid.AutoRotate = false
+	target:SetAttribute("ScytheHookedUntil", finishAt)
+
+	if targetPlayer then
+		setServerOwnership(targetRoot, true)
+	end
 
 	while os.clock() < finishAt do
 		local _, sourceHumanoid, sourceRoot = getCharacterState(player)
@@ -201,28 +220,29 @@ local function pullCaughtTarget(player: Player, target: Model, duration: number)
 			break
 		end
 
-		local speed = math.clamp(horizontal.Magnitude * 3.2, PULL_MIN_SPEED, PULL_MAX_SPEED)
+		local speed = math.clamp(horizontal.Magnitude * 4.2, PULL_MIN_SPEED, PULL_MAX_SPEED)
 		local vertical = math.clamp(delta.Y * PULL_VERTICAL_GAIN, -PULL_MAX_VERTICAL_SPEED, PULL_MAX_VERTICAL_SPEED)
 		targetRoot.AssemblyLinearVelocity = horizontal.Unit * speed + Vector3.new(0, vertical, 0)
-		task.wait(PULL_TICK)
+		RunService.Heartbeat:Wait()
 	end
 
-	local _, finalRoot = getLiveTargetState(target)
+	local finalHumanoid, finalRoot = getLiveTargetState(target)
 	if finalRoot then
 		local velocity = finalRoot.AssemblyLinearVelocity
 		finalRoot.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
-		setServerOwnership(finalRoot, false)
+		if targetPlayer then
+			setServerOwnership(finalRoot, false)
+		end
 	end
-end
-
-local function didHookFromDamageResult(result: any): boolean
-	return type(result) == "table"
-		and type(result.damage) == "number"
-		and result.damage > 0
-		and result.blocked ~= true
-		and result.parried ~= true
-		and result.clashed ~= true
-		and result.dodged ~= true
+	if finalHumanoid then
+		finalHumanoid.WalkSpeed = oldWalkSpeed
+		finalHumanoid.JumpPower = oldJumpPower
+		finalHumanoid.JumpHeight = oldJumpHeight
+		finalHumanoid.AutoRotate = oldAutoRotate
+	end
+	if target.Parent then
+		target:SetAttribute("ScytheHookedUntil", nil)
+	end
 end
 
 local function performThrow(player: Player)
@@ -236,10 +256,8 @@ local function performThrow(player: Player)
 	local outwardStepTime = THROW_OUT_DURATION / outwardSteps
 
 	character:SetAttribute("SpecialMoveActive", "scythe_throw")
-	character:SetAttribute("AttackActiveUntil", os.clock() + THROW_OUT_DURATION + THROW_MAX_RETURN_DURATION)
+	character:SetAttribute("AttackActiveUntil", os.clock() + THROW_OUT_DURATION + 0.9)
 
-	-- Keep the original start packet shape for compatibility. The client-side restorer
-	-- listens for a second return packet and keeps the held scythe hidden until then.
 	UseMove:FireAllClients("FX", "scythe_throw", player.UserId, origin, direction, THROW_RANGE)
 
 	task.spawn(function()
@@ -265,8 +283,14 @@ local function performThrow(player: Player)
 				local humanoid = target:FindFirstChildOfClass("Humanoid")
 				if humanoid then
 					local result = DamageHandler.ApplyDamage(humanoid, THROW_DAMAGE, player)
-					if didHookFromDamageResult(result) then
+					if ScytheThrowPullPolicy.DidHookFromDamageResult(result) then
 						caughtTarget = target
+						local _, caughtRoot = getLiveTargetState(target)
+						if caughtRoot then
+							-- Cancel DamageHandler's normal outward throw knockback immediately.
+							caughtRoot.AssemblyLinearVelocity = Vector3.zero
+							caughtRoot.AssemblyAngularVelocity = Vector3.zero
+						end
 					end
 				end
 				-- Any actual contact makes the boomerang reverse. Successful defence prevents the pull.
@@ -286,6 +310,12 @@ local function performThrow(player: Player)
 			THROW_MIN_RETURN_DURATION,
 			THROW_MAX_RETURN_DURATION
 		)
+		local pullDuration: number? = nil
+		if caughtTarget then
+			pullDuration = ScytheThrowPullPolicy.GetPullDuration(returnDuration)
+			-- On a hook, keep the visible scythe attached to the same return window as the drag.
+			returnDuration = math.max(returnDuration, pullDuration)
+		end
 
 		UseMove:FireAllClients(
 			"FX",
@@ -295,8 +325,8 @@ local function performThrow(player: Player)
 			returnDuration
 		)
 
-		if caughtTarget then
-			pullCaughtTarget(player, caughtTarget, returnDuration)
+		if caughtTarget and pullDuration then
+			pullCaughtTarget(player, caughtTarget, pullDuration)
 		else
 			task.wait(returnDuration)
 		end
