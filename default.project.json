@@ -3,6 +3,11 @@
   "tree": {
     "$className": "DataModel",
 
+    "ReplicatedFirst": {
+      "$path": "migration/ReplicatedFirst",
+      "$ignoreUnknownInstances": true
+    },
+
     "ReplicatedStorage": {
       "$path": "migration/ReplicatedStorage",
       "$ignoreUnknownInstances": true
