@@ -21,6 +21,15 @@ local function isScytheTool(instance: Instance): boolean
 	return string.find(lowerName, "scythe", 1, true) ~= nil
 end
 
+local function getEquippedScythe(character: Model): Tool?
+	for _, child in ipairs(character:GetChildren()) do
+		if isScytheTool(child) then
+			return child :: Tool
+		end
+	end
+	return nil
+end
+
 local function canShowSlash(player: Player, character: Model, tool: Tool): boolean
 	if player.Character ~= character or tool.Parent ~= character then
 		return false
@@ -40,27 +49,31 @@ local function canShowSlash(player: Player, character: Model, tool: Tool): boole
 	return true
 end
 
+local function replicateSlash(player: Player, character: Model, tool: Tool)
+	if not canShowSlash(player, character, tool) then
+		return
+	end
+
+	local now = os.clock()
+	local previous = lastSlashByPlayer[player] or 0
+	if now - previous < MIN_SLASH_INTERVAL then
+		return
+	end
+	lastSlashByPlayer[player] = now
+
+	-- VFX only: no hitboxes, damage, cooldowns, or substitute geometry.
+	VFXEvent:FireAllClients("Slash", player.UserId)
+end
+
 local function connectTool(player: Player, character: Model, tool: Tool)
 	if connectedTools[tool] then
 		return
 	end
 	connectedTools[tool] = true
 
+	-- Keep server Tool.Activated as a fallback for tools whose activation replicates.
 	tool.Activated:Connect(function()
-		if not canShowSlash(player, character, tool) then
-			return
-		end
-
-		local now = os.clock()
-		local previous = lastSlashByPlayer[player] or 0
-		if now - previous < MIN_SLASH_INTERVAL then
-			return
-		end
-		lastSlashByPlayer[player] = now
-
-		-- Only tells clients which player's authored slash VFX to play.
-		-- It does not create hitboxes, damage, cooldowns, or substitute geometry.
-		VFXEvent:FireAllClients("Slash", player.UserId)
+		replicateSlash(player, character, tool)
 	end)
 end
 
@@ -87,6 +100,26 @@ local function setupPlayer(player: Player)
 		setupCharacter(player, player.Character)
 	end
 end
+
+-- Reliable client-to-server VFX request. The server independently verifies that the
+-- player is alive, allowed to attack, and currently holding a scythe before relaying it.
+VFXEvent.OnServerEvent:Connect(function(player, action)
+	if action ~= "Slash" then
+		return
+	end
+
+	local character = player.Character
+	if not character then
+		return
+	end
+
+	local tool = getEquippedScythe(character)
+	if not tool then
+		return
+	end
+
+	replicateSlash(player, character, tool)
+end)
 
 Players.PlayerAdded:Connect(setupPlayer)
 Players.PlayerRemoving:Connect(function(player)
