@@ -1,5 +1,6 @@
 local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
 
 local DATA_STORE_NAME = "ScythePlayerData_v1"
 local AUTO_SAVE_INTERVAL = 120
@@ -12,6 +13,7 @@ local DataService = {}
 local profiles = {}
 local profileLoaded = {}
 local profileLoadFailed = {}
+local profileSaveBlocked = {}
 local saving = {}
 
 local DEFAULT_PROFILE = {
@@ -82,6 +84,18 @@ local function syncGoldDisplay(player, profile)
 	end
 end
 
+local function installTemporaryStudioProfile(player)
+	local profile = deepCopy(DEFAULT_PROFILE)
+	profile.Gold = normalizeGold(profile.Gold)
+	profiles[player] = profile
+	profileLoaded[player] = true
+	profileLoadFailed[player] = nil
+	profileSaveBlocked[player] = true
+	syncGoldDisplay(player, profile)
+	warn("[DataService] Using temporary NON-SAVING Studio data for " .. player.Name .. ". Enable Studio API Services to test persistence.")
+	return profile
+end
+
 function DataService.LoadProfile(player)
 	if profiles[player] then
 		return profiles[player]
@@ -112,9 +126,14 @@ function DataService.LoadProfile(player)
 		end
 	end
 
-	-- Never manufacture a default profile after a failed read. Doing that allows an
-	-- autosave to overwrite a real profile during a temporary DataStore outage.
+	-- Never manufacture SAVEABLE default data after a failed read. In live servers
+	-- this fails closed. In Studio we may still need to test gameplay with API
+	-- access disabled, so use an explicitly non-saving temporary profile instead.
 	if not success then
+		if RunService:IsStudio() and player.Parent == Players then
+			return installTemporaryStudioProfile(player)
+		end
+
 		profileLoadFailed[player] = true
 		warn("[DataService] Refusing to create/save fallback data for " .. player.Name .. " because loading failed")
 		if player.Parent == Players then
@@ -135,13 +154,18 @@ function DataService.LoadProfile(player)
 	profile.Gold = normalizeGold(profile.Gold)
 	profiles[player] = profile
 	profileLoaded[player] = true
+	profileLoadFailed[player] = nil
+	profileSaveBlocked[player] = nil
 	syncGoldDisplay(player, profile)
 	return profile
 end
 
 function DataService.SaveProfile(player)
 	local profile = profiles[player]
-	if not profile or profileLoaded[player] ~= true or profileLoadFailed[player] then
+	if not profile
+		or profileLoaded[player] ~= true
+		or profileLoadFailed[player]
+		or profileSaveBlocked[player] then
 		return false
 	end
 	if saving[player] then
@@ -198,6 +222,10 @@ function DataService.IsLoaded(player)
 	return profileLoaded[player] == true and profileLoadFailed[player] ~= true
 end
 
+function DataService.IsPersistent(player)
+	return DataService.IsLoaded(player) and profileSaveBlocked[player] ~= true
+end
+
 function DataService.GetGold(player)
 	local profile = DataService.GetProfile(player)
 	return profile and normalizeGold(profile.Gold) or 0
@@ -232,12 +260,16 @@ function DataService.AddClawTokens(player, amount)
 end
 
 function DataService.UnloadProfile(player)
-	if profiles[player] and profileLoaded[player] and not profileLoadFailed[player] then
+	if profiles[player]
+		and profileLoaded[player]
+		and not profileLoadFailed[player]
+		and not profileSaveBlocked[player] then
 		DataService.SaveProfile(player)
 	end
 	profiles[player] = nil
 	profileLoaded[player] = nil
 	profileLoadFailed[player] = nil
+	profileSaveBlocked[player] = nil
 	saving[player] = nil
 end
 
@@ -253,7 +285,10 @@ task.spawn(function()
 	while true do
 		task.wait(AUTO_SAVE_INTERVAL)
 		for _, player in ipairs(Players:GetPlayers()) do
-			if profiles[player] and profileLoaded[player] and not profileLoadFailed[player] then
+			if profiles[player]
+				and profileLoaded[player]
+				and not profileLoadFailed[player]
+				and not profileSaveBlocked[player] then
 				task.spawn(DataService.SaveProfile, player)
 			end
 		end
@@ -262,7 +297,10 @@ end)
 
 game:BindToClose(function()
 	for _, player in ipairs(Players:GetPlayers()) do
-		if profiles[player] and profileLoaded[player] and not profileLoadFailed[player] then
+		if profiles[player]
+			and profileLoaded[player]
+			and not profileLoadFailed[player]
+			and not profileSaveBlocked[player] then
 			DataService.SaveProfile(player)
 		end
 	end
