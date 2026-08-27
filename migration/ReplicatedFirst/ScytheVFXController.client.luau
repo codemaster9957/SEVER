@@ -6,17 +6,19 @@ local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
+local LocalPlayer = Players.LocalPlayer
 local VFXEvent = ReplicatedStorage:WaitForChild("ScytheVFXEvent") :: RemoteEvent
 local SlashTemplate = ReplicatedStorage:WaitForChild("scythe slash (NEW)")
 
 local SLASH_FOLLOW_TIME = 0.34
 local SLASH_MIN_LIFETIME = 0.65
 local SLASH_MAX_LIFETIME = 2.5
-local SLASH_DEDUPE = 0.07
+local SLASH_DEDUPE = 0.18
 local THROW_FLATTEN_ROTATION = CFrame.Angles(math.rad(90), 0, 0)
 
 local lastSlashByUserId: {[number]: number} = {}
 local trackedThrows: {[Instance]: any} = {}
+local connectedLocalTools = setmetatable({}, { __mode = "k" })
 
 local function isScytheTool(instance: Instance): boolean
 	return instance:IsA("Tool")
@@ -213,6 +215,57 @@ local function playSlash(character: Model)
 	end)
 end
 
+local function requestSlash(userId: number, character: Model)
+	local now = os.clock()
+	local previous = lastSlashByUserId[userId] or 0
+	if now - previous < SLASH_DEDUPE then
+		return
+	end
+	lastSlashByUserId[userId] = now
+	playSlash(character)
+end
+
+local function connectLocalTool(tool: Tool)
+	if connectedLocalTools[tool] then
+		return
+	end
+	connectedLocalTools[tool] = true
+
+	tool.Activated:Connect(function()
+		local character = LocalPlayer.Character
+		if not character or tool.Parent ~= character then
+			return
+		end
+
+		if character:GetAttribute("Stunned") == true
+			or character:GetAttribute("IsBlocking") == true
+			or character:GetAttribute("CanAttack") == false then
+			return
+		end
+
+		requestSlash(LocalPlayer.UserId, character)
+	end)
+end
+
+local function setupLocalCharacter(character: Model)
+	for _, child in ipairs(character:GetChildren()) do
+		if isScytheTool(child) then
+			connectLocalTool(child :: Tool)
+		end
+	end
+
+	character.ChildAdded:Connect(function(child)
+		if isScytheTool(child) then
+			connectLocalTool(child :: Tool)
+		end
+	end)
+end
+
+LocalPlayer.CharacterAdded:Connect(setupLocalCharacter)
+if LocalPlayer.Character then
+	task.defer(setupLocalCharacter, LocalPlayer.Character)
+end
+
 local function flattenedDirection(cframe: CFrame, velocity: Vector3): Vector3
 	local flatVelocity = Vector3.new(velocity.X, 0, velocity.Z)
 	if flatVelocity.Magnitude > 1 then
@@ -302,16 +355,9 @@ VFXEvent.OnClientEvent:Connect(function(action, userId)
 		return
 	end
 
-	local now = os.clock()
-	local previous = lastSlashByUserId[userId] or 0
-	if now - previous < SLASH_DEDUPE then
-		return
-	end
-	lastSlashByUserId[userId] = now
-
 	local player = Players:GetPlayerByUserId(userId)
 	local character = player and player.Character
 	if character then
-		playSlash(character)
+		requestSlash(userId, character)
 	end
 end)
