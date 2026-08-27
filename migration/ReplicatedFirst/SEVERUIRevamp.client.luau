@@ -1,6 +1,5 @@
 --!strict
--- Cohesive SEVER presentation layer.
--- Existing matchmaking and battle logic stays untouched; this script owns visuals only.
+-- Cohesive SEVER presentation layer. Existing gameplay/remotes stay untouched.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -9,8 +8,7 @@ local RunService = game:GetService("RunService")
 
 local player = Players.LocalPlayer
 local playerGui = player:WaitForChild("PlayerGui")
-local MatchEvents = ReplicatedStorage:WaitForChild("MatchEvents")
-local GameStateUpdate = MatchEvents:WaitForChild("GameStateUpdate")
+local GameStateUpdate = ReplicatedStorage:WaitForChild("MatchEvents"):WaitForChild("GameStateUpdate")
 local Policy = require(script.Parent:WaitForChild("UIUnifierPolicy"))
 
 local battleActive = false
@@ -36,8 +34,8 @@ local function firstText(root: Instance): TextLabel | TextButton?
 end
 
 local function visibleText(root: Instance): string
-	local text = firstText(root)
-	return text and text.Text or ""
+	local object = firstText(root)
+	return object and object.Text or ""
 end
 
 local function contextText(instance: Instance, depth: number): string
@@ -53,6 +51,13 @@ local function contextText(instance: Instance, depth: number): string
 	return table.concat(pieces, " ")
 end
 
+local function directModifier(root: Instance, className: string): Instance?
+	for _, child in ipairs(root:GetChildren()) do
+		if child.ClassName == className then return child end
+	end
+	return nil
+end
+
 local function isTrainingButton(button: GuiButton): boolean
 	local combined = lower(button.Name .. " " .. visibleText(button) .. " " .. contextText(button, 3))
 	return button:GetAttribute("SEVERTrainingLevelControl") == true
@@ -62,29 +67,18 @@ local function isTrainingButton(button: GuiButton): boolean
 		or string.find(combined, "dummy level", 1, true) ~= nil
 end
 
-local function directModifier(root: Instance, className: string): Instance?
-	for _, child in ipairs(root:GetChildren()) do
-		if child.ClassName == className then return child end
-	end
-	return nil
-end
-
 local function findThemeButton(): GuiButton?
 	local best: GuiButton? = nil
-	local bestScore = -math.huge
+	local scoreBest = -math.huge
 	for _, descendant in ipairs(playerGui:GetDescendants()) do
-		-- Deliberately DO NOT require Visible. Training settings are often hidden in Lobby.
+		-- Hidden controls count: training settings are normally invisible in Lobby.
 		if descendant:IsA("GuiButton") and isTrainingButton(descendant) then
 			local score = 10
-			local text = lower(visibleText(descendant))
-			if string.find(text, "respawn", 1, true) then score += 20 end
+			if string.find(lower(visibleText(descendant)), "respawn", 1, true) then score += 20 end
 			if directModifier(descendant, "UICorner") then score += 4 end
 			if directModifier(descendant, "UIStroke") then score += 4 end
 			if directModifier(descendant, "UIGradient") then score += 4 end
-			if score > bestScore then
-				bestScore = score
-				best = descendant
-			end
+			if score > scoreBest then best, scoreBest = descendant, score end
 		end
 	end
 	return best
@@ -99,7 +93,26 @@ local function cloneModifier(template: Instance?, target: Instance, className: s
 	end
 end
 
-local function fallbackSurface(target: GuiObject)
+local function applyTextTheme(root: Instance, template: GuiButton?)
+	local source = template and firstText(template) or nil
+	local function style(textObject: TextLabel | TextButton)
+		if source then
+			textObject.FontFace = source.FontFace
+			textObject.TextColor3 = source.TextColor3
+			textObject.TextStrokeColor3 = source.TextStrokeColor3
+			textObject.TextStrokeTransparency = source.TextStrokeTransparency
+		else
+			textObject.TextColor3 = Color3.fromRGB(247, 247, 250)
+			textObject.TextStrokeTransparency = 1
+		end
+	end
+	if root:IsA("TextLabel") or root:IsA("TextButton") then style(root) end
+	for _, descendant in ipairs(root:GetDescendants()) do
+		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then style(descendant) end
+	end
+end
+
+local function ensureFallbackSurface(target: GuiObject)
 	if not directModifier(target, "UICorner") then
 		local corner = Instance.new("UICorner")
 		corner.CornerRadius = UDim.new(0, 12)
@@ -114,26 +127,7 @@ local function fallbackSurface(target: GuiObject)
 	end
 end
 
-local function styleText(root: Instance, template: GuiButton?)
-	local source = template and firstText(template) or nil
-	local function apply(textObject: TextLabel | TextButton)
-		if source then
-			textObject.FontFace = source.FontFace
-			textObject.TextColor3 = source.TextColor3
-			textObject.TextStrokeColor3 = source.TextStrokeColor3
-			textObject.TextStrokeTransparency = source.TextStrokeTransparency
-		else
-			textObject.TextColor3 = Color3.fromRGB(247, 247, 250)
-			textObject.TextStrokeTransparency = 1
-		end
-	end
-	if root:IsA("TextLabel") or root:IsA("TextButton") then apply(root) end
-	for _, descendant in ipairs(root:GetDescendants()) do
-		if descendant:IsA("TextLabel") or descendant:IsA("TextButton") then apply(descendant) end
-	end
-end
-
-local function styleSurface(target: GuiObject, template: GuiButton?, strong: boolean?)
+local function applySurface(target: GuiObject, template: GuiButton?, strong: boolean?)
 	if template then
 		target.BackgroundColor3 = template.BackgroundColor3
 		target.BackgroundTransparency = math.clamp(template.BackgroundTransparency + (strong and -0.04 or 0.02), 0, 0.8)
@@ -143,21 +137,18 @@ local function styleSurface(target: GuiObject, template: GuiButton?, strong: boo
 	else
 		target.BackgroundColor3 = Color3.fromRGB(20, 21, 28)
 		target.BackgroundTransparency = strong and 0.06 or 0.14
-		fallbackSurface(target)
+		ensureFallbackSurface(target)
 	end
 	target.BorderSizePixel = 0
-	styleText(target, template)
-end
-
-local function isMatchmaking(button: GuiButton): boolean
-	if isTrainingButton(button) then return false end
-	return Policy.IsMatchmakingControl(button.Name, contextText(button, 3))
+	applyTextTheme(target, template)
 end
 
 local function refreshMatchmaking(template: GuiButton?)
 	for _, descendant in ipairs(playerGui:GetDescendants()) do
-		if descendant:IsA("GuiButton") and isMatchmaking(descendant) then
-			styleSurface(descendant, template, true)
+		if descendant:IsA("GuiButton")
+			and not isTrainingButton(descendant)
+			and Policy.IsMatchmakingControl(descendant.Name, contextText(descendant, 3)) then
+			applySurface(descendant, template, true)
 			if template then descendant.AutoButtonColor = template.AutoButtonColor end
 			if battleActive then
 				if matchmakingSnapshots[descendant] == nil then matchmakingSnapshots[descendant] = descendant.Visible end
@@ -170,14 +161,14 @@ local function refreshMatchmaking(template: GuiButton?)
 	end
 end
 
-local function refreshHealthTheme(template: GuiButton?)
+local function refreshHealthContainers(template: GuiButton?)
 	if not battleActive then return end
 	for _, descendant in ipairs(playerGui:GetDescendants()) do
 		if descendant:IsA("GuiObject") and descendant.Visible then
-			local role = Policy.ClassifyHealthPanel(descendant.Name, contextText(descendant, 2))
 			local name = lower(descendant.Name)
-			if role and (string.find(name, "display", 1, true) or string.find(name, "health", 1, true)) then
-				styleSurface(descendant, template, false)
+			-- Only the outer containers get themed. Never recolour HealthFill/Bar children.
+			if string.find(name, "playerdisplay", 1, true) or string.find(name, "opponentdisplay", 1, true) then
+				applySurface(descendant, template, false)
 			end
 		end
 	end
@@ -191,7 +182,7 @@ local function accentColor(template: GuiButton?): Color3
 	return Color3.fromRGB(232, 232, 240)
 end
 
-local function createText(parent: Instance, text: string, size: UDim2, position: UDim2, textSize: number, template: GuiButton?): TextLabel
+local function makeText(parent: Instance, text: string, size: UDim2, position: UDim2, textSize: number, template: GuiButton?): TextLabel
 	local label = Instance.new("TextLabel")
 	label.BackgroundTransparency = 1
 	label.Size = size
@@ -202,15 +193,12 @@ local function createText(parent: Instance, text: string, size: UDim2, position:
 	label.TextXAlignment = Enum.TextXAlignment.Center
 	label.TextYAlignment = Enum.TextYAlignment.Center
 	label.Parent = parent
-	styleText(label, template)
+	applyTextTheme(label, template)
 	return label
 end
 
 local function loadHeadshot(image: ImageLabel, userId: number)
-	if userId <= 0 then
-		image.Visible = false
-		return
-	end
+	if userId <= 0 then image.Visible = false return end
 	task.spawn(function()
 		local ok, content = pcall(function()
 			return Players:GetUserThumbnailAsync(userId, Enum.ThumbnailType.HeadShot, Enum.ThumbnailSize.Size420x420)
@@ -219,23 +207,23 @@ local function loadHeadshot(image: ImageLabel, userId: number)
 	end)
 end
 
-local function createFighterCard(parent: Instance, fighterName: string, userId: number, leftSide: boolean, template: GuiButton?): Frame
+local function makeCard(parent: Instance, fighterName: string, userId: number, leftSide: boolean, template: GuiButton?): Frame
 	local card = Instance.new("Frame")
 	card.AnchorPoint = Vector2.new(0.5, 0.5)
 	card.Size = UDim2.fromScale(0.31, 0.32)
 	card.Position = leftSide and UDim2.fromScale(-0.18, 0.52) or UDim2.fromScale(1.18, 0.52)
 	card.Parent = parent
-	styleSurface(card, template, true)
+	applySurface(card, template, true)
 
 	local portrait = Instance.new("Frame")
 	portrait.AnchorPoint = Vector2.new(0.5, 0)
 	portrait.Position = UDim2.fromScale(0.5, 0.07)
 	portrait.Size = UDim2.fromScale(0.34, 0.48)
 	portrait.Parent = card
-	styleSurface(portrait, template, false)
-	local portraitAspect = Instance.new("UIAspectRatioConstraint")
-	portraitAspect.AspectRatio = 1
-	portraitAspect.Parent = portrait
+	applySurface(portrait, template, false)
+	local aspect = Instance.new("UIAspectRatioConstraint")
+	aspect.AspectRatio = 1
+	aspect.Parent = portrait
 	local portraitCorner = portrait:FindFirstChildOfClass("UICorner")
 	if portraitCorner then portraitCorner.CornerRadius = UDim.new(1, 0) end
 
@@ -248,13 +236,13 @@ local function createFighterCard(parent: Instance, fighterName: string, userId: 
 	imageCorner.Parent = image
 	loadHeadshot(image, userId)
 	if userId <= 0 then
-		local ai = createText(portrait, "AI", UDim2.fromScale(1, 1), UDim2.fromScale(0, 0), 34, template)
+		local ai = makeText(portrait, "AI", UDim2.fromScale(1, 1), UDim2.fromScale(0, 0), 34, template)
 		ai.TextScaled = true
 	end
 
-	local tag = createText(card, userId <= 0 and "TRAINING DUMMY" or (leftSide and "CHALLENGER" or "OPPONENT"), UDim2.fromScale(0.9, 0.11), UDim2.fromScale(0.05, 0.59), 12, template)
+	local tag = makeText(card, userId <= 0 and "TRAINING DUMMY" or (leftSide and "CHALLENGER" or "OPPONENT"), UDim2.fromScale(0.9, 0.11), UDim2.fromScale(0.05, 0.59), 12, template)
 	tag.TextTransparency = 0.24
-	local nameLabel = createText(card, string.upper(fighterName), UDim2.fromScale(0.9, 0.19), UDim2.fromScale(0.05, 0.7), 24, template)
+	local nameLabel = makeText(card, string.upper(fighterName), UDim2.fromScale(0.9, 0.19), UDim2.fromScale(0.05, 0.7), 24, template)
 	nameLabel.TextScaled = true
 	local limit = Instance.new("UITextSizeConstraint")
 	limit.MinTextSize = 13
@@ -272,7 +260,6 @@ local function legacyName(name: string): boolean
 end
 
 local function suppressLegacyIntro()
-	if not introActive then return end
 	for _, child in ipairs(playerGui:GetChildren()) do
 		if child:IsA("ScreenGui") and child ~= introGui and legacyName(child.Name) then
 			if legacyGuiSnapshots[child] == nil then legacyGuiSnapshots[child] = child.Enabled end
@@ -309,9 +296,7 @@ local function closeIntro(animated: boolean)
 	local root = gui:FindFirstChild("Root")
 	if animated and root and root:IsA("Frame") then
 		TweenService:Create(root, TweenInfo.new(0.18, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 1}):Play()
-		task.delay(0.2, function()
-			if gui.Parent then gui:Destroy() end
-		end)
+		task.delay(0.2, function() if gui.Parent then gui:Destroy() end end)
 	else
 		gui:Destroy()
 	end
@@ -327,8 +312,7 @@ local function startIntro(data: any)
 	local p2 = type(data) == "table" and data.p2 or nil
 	if type(p1) ~= "table" then p1 = {Name = player.Name, UserId = player.UserId} end
 	if type(p2) ~= "table" then p2 = {Name = "Opponent", UserId = 0} end
-	local left = p1
-	local right = p2
+	local left, right = p1, p2
 	if tonumber(p2.UserId) == player.UserId then left, right = p2, p1 end
 
 	local template = findThemeButton()
@@ -349,28 +333,27 @@ local function startIntro(data: any)
 	root.Name = "Root"
 	root.Size = UDim2.fromScale(1, 1)
 	root.BackgroundColor3 = Color3.fromRGB(6, 6, 9)
-	root.BackgroundTransparency = 0.02
+	root.BackgroundTransparency = 1
 	root.BorderSizePixel = 0
 	root.Parent = gui
-
-	local backgroundGradient = Instance.new("UIGradient")
-	backgroundGradient.Rotation = 90
-	backgroundGradient.Color = ColorSequence.new({
+	local gradient = Instance.new("UIGradient")
+	gradient.Rotation = 90
+	gradient.Color = ColorSequence.new({
 		ColorSequenceKeypoint.new(0, Color3.fromRGB(7, 7, 11)),
 		ColorSequenceKeypoint.new(0.5, Color3.fromRGB(18, 18, 24)),
 		ColorSequenceKeypoint.new(1, Color3.fromRGB(5, 5, 8)),
 	})
-	backgroundGradient.Parent = root
+	gradient.Parent = root
 
-	local title = createText(root, "SEVER  //  DUEL", mobile and UDim2.fromScale(0.62, 0.055) or UDim2.fromScale(0.38, 0.055), mobile and UDim2.fromScale(0.19, 0.09) or UDim2.fromScale(0.31, 0.08), 16, template)
+	local title = makeText(root, "SEVER  //  DUEL", mobile and UDim2.fromScale(0.62, 0.055) or UDim2.fromScale(0.38, 0.055), mobile and UDim2.fromScale(0.19, 0.09) or UDim2.fromScale(0.31, 0.08), 16, template)
 	title.TextScaled = true
 	local titleLimit = Instance.new("UITextSizeConstraint")
 	titleLimit.MinTextSize = 11
 	titleLimit.MaxTextSize = 18
 	titleLimit.Parent = title
 
-	local leftCard = createFighterCard(root, tostring(left.Name or "PLAYER"), tonumber(left.UserId) or 0, true, template)
-	local rightCard = createFighterCard(root, tostring(right.Name or "OPPONENT"), tonumber(right.UserId) or 0, false, template)
+	local leftCard = makeCard(root, tostring(left.Name or "PLAYER"), tonumber(left.UserId) or 0, true, template)
+	local rightCard = makeCard(root, tostring(right.Name or "OPPONENT"), tonumber(right.UserId) or 0, false, template)
 	if mobile then
 		leftCard.Size = UDim2.fromScale(0.4, 0.3)
 		rightCard.Size = UDim2.fromScale(0.4, 0.3)
@@ -394,30 +377,29 @@ local function startIntro(data: any)
 	vsShell.Position = UDim2.fromScale(0.5, 0.52)
 	vsShell.Size = UDim2.fromOffset(18, 18)
 	vsShell.Parent = root
-	styleSurface(vsShell, template, true)
+	applySurface(vsShell, template, true)
 	local vsAspect = Instance.new("UIAspectRatioConstraint")
 	vsAspect.AspectRatio = 1
 	vsAspect.Parent = vsShell
 	local circle = vsShell:FindFirstChildOfClass("UICorner")
 	if circle then circle.CornerRadius = UDim.new(1, 0) end
-	local vs = createText(vsShell, "VS", UDim2.fromScale(1, 1), UDim2.fromScale(0, 0), 32, template)
+	local vs = makeText(vsShell, "VS", UDim2.fromScale(1, 1), UDim2.fromScale(0, 0), 32, template)
 	vs.TextScaled = true
 	vs.TextStrokeTransparency = 0.55
 
-	local footer = createText(root, "ARENA LINK ESTABLISHED", UDim2.fromScale(0.38, 0.04), UDim2.fromScale(0.31, 0.89), 12, template)
+	local footer = makeText(root, "ARENA LINK ESTABLISHED", UDim2.fromScale(0.38, 0.04), UDim2.fromScale(0.31, 0.89), 12, template)
 	footer.TextTransparency = 0.3
 	footer.TextScaled = true
 
-	root.BackgroundTransparency = 1
+	suppressLegacyIntro()
 	TweenService:Create(root, TweenInfo.new(0.18), {BackgroundTransparency = 0.02}):Play()
 	TweenService:Create(leftCard, TweenInfo.new(0.42, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = UDim2.fromScale(0.27, 0.52)}):Play()
 	TweenService:Create(rightCard, TweenInfo.new(0.42, Enum.EasingStyle.Quint, Enum.EasingDirection.Out), {Position = UDim2.fromScale(0.73, 0.52)}):Play()
 	TweenService:Create(vsShell, TweenInfo.new(0.32, Enum.EasingStyle.Back, Enum.EasingDirection.Out), {Size = mobile and UDim2.fromOffset(58, 58) or UDim2.fromOffset(88, 88)}):Play()
 	TweenService:Create(slash, TweenInfo.new(0.2, Enum.EasingStyle.Quad, Enum.EasingDirection.Out), {BackgroundTransparency = 0.14}):Play()
 
-	suppressLegacyIntro()
 	task.spawn(function()
-		while introActive and token == introToken do
+		while token == introToken and battleActive do
 			suppressLegacyIntro()
 			task.wait(0.08)
 		end
@@ -427,7 +409,7 @@ end
 local function refreshPresentation()
 	local template = findThemeButton()
 	refreshMatchmaking(template)
-	refreshHealthTheme(template)
+	refreshHealthContainers(template)
 end
 
 GameStateUpdate.OnClientEvent:Connect(function(state, data)
@@ -436,9 +418,7 @@ GameStateUpdate.OnClientEvent:Connect(function(state, data)
 		startIntro(data)
 	elseif Policy.IsBattleState(state) then
 		battleActive = true
-		if state == "Countdown" or state == "Fighting" or state == "MatchEnded" or state == "ReturningToLobby" then
-			closeIntro(true)
-		end
+		if state == "Countdown" or state == "Fighting" or state == "MatchEnded" or state == "ReturningToLobby" then closeIntro(true) end
 	elseif state == "Lobby" then
 		battleActive = false
 		closeIntro(false)
@@ -447,9 +427,7 @@ GameStateUpdate.OnClientEvent:Connect(function(state, data)
 	task.defer(refreshPresentation)
 end)
 
-playerGui.DescendantAdded:Connect(function()
-	task.defer(refreshPresentation)
-end)
+playerGui.DescendantAdded:Connect(function() task.defer(refreshPresentation) end)
 
 local accumulator = 0
 RunService.Heartbeat:Connect(function(dt)
