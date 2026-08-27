@@ -1,90 +1,71 @@
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerScriptService = game:GetService("ServerScriptService")
 
 local function getOrCreateFolder(parent, name)
 	local folder = parent:FindFirstChild(name)
-
 	if not folder then
 		folder = Instance.new("Folder")
 		folder.Name = name
 		folder.Parent = parent
 	end
-
 	return folder
 end
 
 local function getOrCreateRemote(parent, name)
 	local remote = parent:FindFirstChild(name)
-
 	if not remote then
 		remote = Instance.new("RemoteEvent")
 		remote.Name = name
 		remote.Parent = parent
 	end
-
 	return remote
 end
 
 local MatchEvents = getOrCreateFolder(ReplicatedStorage, "MatchEvents")
-
-local GameStateUpdate = getOrCreateRemote(MatchEvents, "GameStateUpdate")
+getOrCreateRemote(MatchEvents, "GameStateUpdate")
 local RequestBattleIntro = getOrCreateRemote(MatchEvents, "RequestBattleIntro")
 
 local CombatJuice = require(ReplicatedStorage:WaitForChild("CombatJuice"))
+local MatchManager = require(ServerScriptService:WaitForChild("MatchManager"))
 local combatRemote = CombatJuice.GetRemote()
 
 local requestCooldown = {}
 local COOLDOWN = 2
 
-local function resolveOpponent(opponentData)
-	if typeof(opponentData) == "Instance" and opponentData:IsA("Player") then
-		return opponentData, opponentData.Name
-	end
-
-	if typeof(opponentData) == "number" then
-		local foundPlayer = Players:GetPlayerByUserId(opponentData)
-		if foundPlayer then
-			return foundPlayer, foundPlayer.Name
-		end
-	end
-
-	if typeof(opponentData) == "string" then
-		local foundPlayer = Players:FindFirstChild(opponentData)
-
-		if foundPlayer then
-			return foundPlayer, foundPlayer.Name
-		end
-
-		return nil, opponentData
-	end
-
-	return nil, "TRAINING DUMMY"
+local function valid(player)
+	return player and player.Parent == Players
 end
 
-RequestBattleIntro.OnServerEvent:Connect(function(player, opponentData)
-	if not player or not player.Parent then return end
+RequestBattleIntro.OnServerEvent:Connect(function(player)
+	if not valid(player) or not MatchManager.IsPlayerInMatch(player) then return end
 
 	local now = os.clock()
+	if now - (requestCooldown[player] or -math.huge) < COOLDOWN then return end
+	requestCooldown[player] = now
 
-	if requestCooldown[player] and now - requestCooldown[player] < COOLDOWN then
+	-- Never trust opponent names/ids supplied by a client. Resolve the server's
+	-- authoritative match relationship instead.
+	local opponent = MatchManager.GetOpponent(player)
+	if valid(opponent) and opponent ~= player then
+		combatRemote:FireClient(player, "BattleIntroRequest", {
+			player1 = player.Name,
+			player2 = opponent.Name,
+		})
+		combatRemote:FireClient(opponent, "BattleIntroRequest", {
+			player1 = player.Name,
+			player2 = opponent.Name,
+		})
 		return
 	end
 
-	requestCooldown[player] = now
-
-	local opponentPlayer, opponentName = resolveOpponent(opponentData)
-
-	local introData = {
-		player1 = player.Name,
-		player2 = opponentName or "TRAINING DUMMY"
-	}
-
-	combatRemote:FireClient(player, "BattleIntroRequest", introData)
-
-	if opponentPlayer and opponentPlayer ~= player then
-		combatRemote:FireClient(opponentPlayer, "BattleIntroRequest", {
+	-- Training matches have no Player opponent; only permit the dummy intro when
+	-- DummyBattleServer confirms this player owns an active dummy battle.
+	local dummyBattle = _G.GetActiveDummyBattle and _G.GetActiveDummyBattle(player)
+	if dummyBattle then
+		combatRemote:FireClient(player, "BattleIntroRequest", {
 			player1 = player.Name,
-			player2 = opponentPlayer.Name
+			player2 = "TRAINING DUMMY",
 		})
 	end
 end)
