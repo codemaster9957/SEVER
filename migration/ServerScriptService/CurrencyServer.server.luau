@@ -1,18 +1,14 @@
 local Players = game:GetService("Players")
+local ServerScriptService = game:GetService("ServerScriptService")
 
+local DataService = require(ServerScriptService:WaitForChild("DataService"))
 local WIN_REWARD = 3
-local STARTING_GOLD = 50
 
-local function getGold(player)
+local syncing = {}
+
+local function getGoldValue(player)
 	local leaderstats = player:FindFirstChild("leaderstats")
 	return leaderstats and leaderstats:FindFirstChild("Gold")
-end
-
-local function updateCurrency(player)
-	local gold = getGold(player)
-	if gold then
-		player:SetAttribute("Gold", gold.Value)
-	end
 end
 
 local function setupPlayer(player)
@@ -27,24 +23,41 @@ local function setupPlayer(player)
 	if not gold then
 		gold = Instance.new("IntValue")
 		gold.Name = "Gold"
-		gold.Value = STARTING_GOLD
 		gold.Parent = leaderstats
 	end
-	gold.Changed:Connect(function()
-		updateCurrency(player)
+
+	local profile = DataService.GetProfile(player)
+	if not profile then
+		return
+	end
+
+	syncing[player] = true
+	gold.Value = DataService.GetGold(player)
+	player:SetAttribute("Gold", gold.Value)
+	syncing[player] = nil
+
+	gold.Changed:Connect(function(newValue)
+		if syncing[player] or player.Parent ~= Players then return end
+		-- Legacy scripts that still award through leaderstats are redirected into
+		-- the one persisted DataService balance.
+		DataService.SetGold(player, newValue)
 	end)
-	updateCurrency(player)
 end
 
-Players.PlayerAdded:Connect(setupPlayer)
+Players.PlayerAdded:Connect(function(player)
+	task.spawn(setupPlayer, player)
+end)
 
 for _, player in ipairs(Players:GetPlayers()) do
-	task.defer(setupPlayer, player)
+	task.spawn(setupPlayer, player)
 end
 
+Players.PlayerRemoving:Connect(function(player)
+	syncing[player] = nil
+end)
+
 function _G.GiveWinReward(player)
-	local gold = getGold(player)
-	if gold then
-		gold.Value += WIN_REWARD
+	if player and player.Parent == Players then
+		DataService.AddGold(player, WIN_REWARD)
 	end
 end
