@@ -9,7 +9,6 @@ local Shared = require(ReplicatedStorage:WaitForChild("RankedConfig"))
 local MatchManager = require(game:GetService("ServerScriptService"):WaitForChild("MatchManager"))
 
 local RankedMatchmakingService = {}
-
 local queueMap = MemoryStoreService:GetSortedMap("RankedQueue_v2")
 local lockMap = MemoryStoreService:GetHashMap("RankedLocks_v2")
 local DISPATCH_TOPIC = "RankedMatchDispatch_v2"
@@ -26,9 +25,7 @@ end
 
 local function safe(call)
 	local ok, result = pcall(call)
-	if not ok then
-		warn("[RankedMatchmakingService] " .. tostring(result))
-	end
+	if not ok then warn("[RankedMatchmakingService] " .. tostring(result)) end
 	return ok, result
 end
 
@@ -54,12 +51,7 @@ end
 
 local function writeEntry(entry)
 	local ok = safe(function()
-		queueMap:SetAsync(
-			queueKey(entry.UserId),
-			entry,
-			Shared.QueueEntryTTL,
-			entry.Trophies
-		)
+		queueMap:SetAsync(queueKey(entry.UserId), entry, Shared.QueueEntryTTL, entry.Trophies)
 	end)
 	return ok
 end
@@ -67,30 +59,24 @@ end
 local function acquireUserLock(userId, matchId)
 	local ok, result = safe(function()
 		return lockMap:UpdateAsync(userLockKey(userId), function(existing)
-			if existing ~= nil then
-				return existing
-			end
-			return {
-				MatchId = matchId,
-				UserId = userId,
-				CreatedAt = os.time(),
-			}
+			if existing ~= nil then return existing end
+			return {MatchId = matchId, UserId = userId, CreatedAt = os.time()}
 		end, LOCK_TTL)
 	end)
-
-	return ok
-		and type(result) == "table"
-		and result.MatchId == matchId
+	return ok and type(result) == "table" and result.MatchId == matchId
 end
 
 local function releaseUserLock(userId, matchId)
+	local key = userLockKey(userId)
+	local ok, existing = safe(function()
+		return lockMap:GetAsync(key)
+	end)
+	if not ok or type(existing) ~= "table" or existing.MatchId ~= matchId then return end
+
+	-- MemoryStore UpdateAsync returning nil aborts the write; RemoveAsync is the
+	-- documented deletion path. The read check prevents us removing a newer lock.
 	safe(function()
-		return lockMap:UpdateAsync(userLockKey(userId), function(existing)
-			if type(existing) == "table" and existing.MatchId == matchId then
-				return nil
-			end
-			return existing
-		end, LOCK_TTL)
+		lockMap:RemoveAsync(key)
 	end)
 end
 
@@ -113,7 +99,6 @@ function RankedMatchmakingService.Queue(player, trophies)
 
 	local entry = buildEntry(player, trophies)
 	if not writeEntry(entry) then return false end
-
 	queued[player.UserId] = entry
 	lastEntry[player.UserId] = entry
 	return true
@@ -122,49 +107,31 @@ end
 function RankedMatchmakingService.Cancel(player)
 	if not player then return end
 	queued[player.UserId] = nil
-	safe(function()
-		queueMap:RemoveAsync(queueKey(player.UserId))
-	end)
+	safe(function() queueMap:RemoveAsync(queueKey(player.UserId)) end)
 end
 
 function RankedMatchmakingService.Claim(entryA, entryB)
-	if type(entryA) ~= "table" or type(entryB) ~= "table" then return nil end
-	if entryA.UserId == entryB.UserId then return nil end
-
+	if type(entryA) ~= "table" or type(entryB) ~= "table" or entryA.UserId == entryB.UserId then return nil end
 	local matchId = HttpService:GenerateGUID(false)
 
-	-- A random per-match lock cannot prevent two coordinators from claiming the
-	-- same player into different pairs. Lock each UserId instead.
-	if not acquireUserLock(entryA.UserId, matchId) then
-		return nil
-	end
+	if not acquireUserLock(entryA.UserId, matchId) then return nil end
 	if not acquireUserLock(entryB.UserId, matchId) then
 		releaseUserLock(entryA.UserId, matchId)
 		return nil
 	end
 
-	local removedA = safe(function()
-		queueMap:RemoveAsync(queueKey(entryA.UserId))
-	end)
-	local removedB = safe(function()
-		queueMap:RemoveAsync(queueKey(entryB.UserId))
-	end)
-
+	local removedA = safe(function() queueMap:RemoveAsync(queueKey(entryA.UserId)) end)
+	local removedB = safe(function() queueMap:RemoveAsync(queueKey(entryB.UserId)) end)
 	if not removedA or not removedB then
 		releaseClaim(entryA, entryB, matchId, true)
 		return nil
 	end
-
 	return matchId
 end
 
 function RankedMatchmakingService.DispatchMatch(entryA, entryB, matchId)
-	if not matchId or type(entryA) ~= "table" or type(entryB) ~= "table" then
-		return false
-	end
+	if not matchId or type(entryA) ~= "table" or type(entryB) ~= "table" then return false end
 
-	-- Reserve ONCE, then publish the same access code to both source servers. This
-	-- guarantees players matched from different servers converge on one instance.
 	local reserveOk, accessCode = pcall(function()
 		local code = TeleportService:ReserveServerAsync(game.PlaceId)
 		return code
@@ -195,7 +162,6 @@ function RankedMatchmakingService.DispatchMatch(entryA, entryB, matchId)
 		releaseClaim(entryA, entryB, matchId, true)
 		return false
 	end
-
 	return true
 end
 
@@ -211,10 +177,8 @@ function RankedMatchmakingService.ValidateTeleportData(data, player)
 		or type(data.IssuedAt) ~= "number" then
 		return false
 	end
-
 	local age = os.time() - data.IssuedAt
 	if age < -10 or age > 180 then return false end
-
 	for _, userId in ipairs(data.Players) do
 		if userId == player.UserId then return true end
 	end
@@ -250,10 +214,10 @@ local function teleportLocalPlayersForDispatch(data)
 		return
 	end
 
-	local ids = {data.A, data.B}
 	local localPlayers = {}
-	for _, userId in ipairs(ids) do
-		local player = tonumber(userId) and Players:GetPlayerByUserId(userId) or nil
+	for _, userId in ipairs({data.A, data.B}) do
+		local numericId = tonumber(userId)
+		local player = numericId and Players:GetPlayerByUserId(numericId) or nil
 		if valid(player) and not MatchManager.IsPlayerInMatch(player) then
 			queued[player.UserId] = nil
 			inFlight[player.UserId] = data.MatchId
@@ -303,22 +267,17 @@ end
 TeleportService.TeleportInitFailed:Connect(function(player)
 	local matchId = player and inFlight[player.UserId]
 	if not matchId then return end
-
 	inFlight[player.UserId] = nil
 	local entry = lastEntry[player.UserId]
 	if entry and valid(player) and not MatchManager.IsPlayerInMatch(player) then
 		entry.JoinedAt = os.time()
 		entry.JobId = game.JobId
 		entry.Token = HttpService:GenerateGUID(false)
-		if writeEntry(entry) then
-			queued[player.UserId] = entry
-		end
+		if writeEntry(entry) then queued[player.UserId] = entry end
 	end
 end)
 
 Players.PlayerRemoving:Connect(function(player)
-	-- A teleport also raises PlayerRemoving. The queue entry was already removed by
-	-- the coordinator, so Cancel is harmless and prevents stale local queue state.
 	RankedMatchmakingService.Cancel(player)
 	inFlight[player.UserId] = nil
 	lastEntry[player.UserId] = nil
@@ -326,13 +285,9 @@ end)
 
 game:BindToClose(function()
 	for _, player in ipairs(Players:GetPlayers()) do
-		if not inFlight[player.UserId] then
-			RankedMatchmakingService.Cancel(player)
-		end
+		if not inFlight[player.UserId] then RankedMatchmakingService.Cancel(player) end
 	end
-	if typeof(subscription) == "RBXScriptConnection" then
-		subscription:Disconnect()
-	end
+	if typeof(subscription) == "RBXScriptConnection" then subscription:Disconnect() end
 end)
 
 return RankedMatchmakingService
