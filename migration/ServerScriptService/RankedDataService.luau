@@ -1,4 +1,5 @@
 local DataStoreService = game:GetService("DataStoreService")
+local HttpService = game:GetService("HttpService")
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
 
@@ -27,13 +28,22 @@ local function keyForUserId(userId)
 	return "Player_" .. tostring(userId)
 end
 
+local function normalizeTrophies(value)
+	value = tonumber(value) or 0
+	if value ~= value or value == math.huge or value == -math.huge then value = 0 end
+	return math.max(0, math.floor(value))
+end
+
 function RankedDataService.InitializePlayer(player)
 	local profile = DataService.GetProfile(player)
 	if not profile then return false end
-	profile.RankedTrophies = math.max(0, tonumber(profile.RankedTrophies) or 0)
-	profile.RankedWins = math.max(0, tonumber(profile.RankedWins) or 0)
-	profile.RankedLosses = math.max(0, tonumber(profile.RankedLosses) or 0)
+	profile.RankedTrophies = normalizeTrophies(profile.RankedTrophies)
+	profile.RankedWins = math.max(0, math.floor(tonumber(profile.RankedWins) or 0))
+	profile.RankedLosses = math.max(0, math.floor(tonumber(profile.RankedLosses) or 0))
 	initialized[player] = true
+
+	-- The persisted player profile remains the gameplay source of truth; the
+	-- OrderedDataStore is its global leaderboard projection.
 	local saved = retry(function()
 		return trophyStore:SetAsync(tostring(player.UserId), profile.RankedTrophies)
 	end)
@@ -42,40 +52,75 @@ end
 
 function RankedDataService.GetTrophies(player)
 	local profile = DataService.GetProfile(player)
-	return profile and math.max(0, tonumber(profile.RankedTrophies) or 0) or 0
+	return profile and normalizeTrophies(profile.RankedTrophies) or 0
 end
 
 function RankedDataService.ApplyResult(player, matchId, result)
 	if not player or not matchId or (result ~= "Victory" and result ~= "Defeat") then
 		return nil
 	end
+
 	local profile = DataService.GetProfile(player)
 	if not profile then return nil end
+
 	local key = keyForUserId(player.UserId) .. "_" .. tostring(matchId)
+	local claimToken = HttpService:GenerateGUID(false)
+
 	local ok, accepted = retry(function()
 		return resultStore:UpdateAsync(key, function(existing)
 			if existing then return existing end
-			return { UserId = player.UserId, MatchId = tostring(matchId), Result = result, Timestamp = os.time() }
+			return {
+				UserId = player.UserId,
+				MatchId = tostring(matchId),
+				Result = result,
+				Timestamp = os.time(),
+				ClaimToken = claimToken,
+			}
 		end)
 	end)
-	if not ok or not accepted or accepted.Result ~= result then
+
+	if not ok or type(accepted) ~= "table" then return nil end
+
+	-- Only the server invocation whose unique token actually won UpdateAsync may
+	-- mutate trophies. Timestamp equality is not unique and allowed duplicate
+	-- awards whenever two result handlers ran in the same second.
+	if accepted.ClaimToken ~= claimToken then
+		return {
+			Trophies = RankedDataService.GetTrophies(player),
+			Delta = 0,
+			Duplicate = true,
+		}
+	end
+
+	if accepted.Result ~= result then
+		warn("[RankedDataService] Result mismatch for already-settled match " .. tostring(matchId))
 		return nil
 	end
-	if accepted.Timestamp ~= os.time() and accepted.Timestamp < os.time() - Shared.ResultReplayWindow then
-		return nil
-	end
-	if accepted.Timestamp ~= os.time() then
-		return { Trophies = RankedDataService.GetTrophies(player), Delta = 0, Duplicate = true }
-	end
+
 	local delta = result == "Victory" and Shared.WinTrophies or -Shared.LossTrophies
-	profile.RankedTrophies = math.max(0, RankedDataService.GetTrophies(player) + delta)
-	if result == "Victory" then profile.RankedWins += 1 else profile.RankedLosses += 1 end
-	local saved = retry(function()
+	profile.RankedTrophies = normalizeTrophies(RankedDataService.GetTrophies(player) + delta)
+	if result == "Victory" then
+		profile.RankedWins = (profile.RankedWins or 0) + 1
+	else
+		profile.RankedLosses = (profile.RankedLosses or 0) + 1
+	end
+
+	local savedLeaderboard = retry(function()
 		return trophyStore:SetAsync(tostring(player.UserId), profile.RankedTrophies)
 	end)
-	if not saved then return nil end
+	if not savedLeaderboard then
+		warn("[RankedDataService] Leaderboard projection failed for " .. player.Name)
+	end
+
+	-- Even if the global projection is temporarily unavailable, keep the real
+	-- profile mutation and let normal DataService autosave retry persistence.
 	DataService.SaveProfile(player)
-	return { Trophies = profile.RankedTrophies, Delta = delta, Duplicate = false }
+
+	return {
+		Trophies = profile.RankedTrophies,
+		Delta = delta,
+		Duplicate = false,
+	}
 end
 
 function RankedDataService.GetTopEntries(limit)
@@ -83,9 +128,13 @@ function RankedDataService.GetTopEntries(limit)
 		return trophyStore:GetSortedAsync(false, math.clamp(limit or 10, 1, 100))
 	end)
 	if not ok or not pages then return {} end
+
 	local entries = {}
 	for _, entry in ipairs(pages:GetCurrentPage()) do
-		table.insert(entries, { UserId = tonumber(entry.key), Trophies = tonumber(entry.value) or 0 })
+		table.insert(entries, {
+			UserId = tonumber(entry.key),
+			Trophies = tonumber(entry.value) or 0,
+		})
 	end
 	table.sort(entries, function(a, b)
 		if a.Trophies == b.Trophies then return a.UserId < b.UserId end
@@ -113,9 +162,14 @@ function RankedDataService.GetLeaderboardFor(player, radius)
 	local result = {}
 	for index = startIndex, math.min(#entries, rank + (radius or 5)) do
 		local entry = entries[index]
-		table.insert(result, { Rank = index, UserId = entry.UserId, Trophies = entry.Trophies, IsLocal = entry.UserId == player.UserId })
+		table.insert(result, {
+			Rank = index,
+			UserId = entry.UserId,
+			Trophies = entry.Trophies,
+			IsLocal = entry.UserId == player.UserId,
+		})
 	end
-	return { Rank = rank, Trophies = trophies, Entries = result }
+	return {Rank = rank, Trophies = trophies, Entries = result}
 end
 
 Players.PlayerAdded:Connect(function(player)
