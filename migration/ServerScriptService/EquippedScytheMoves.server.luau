@@ -16,10 +16,22 @@ local SPIN_DURATION = 1.8
 local SPIN_TICK = 0.30
 local SPIN_RADIUS = 8
 local SPIN_DAMAGE = 5
+
 local THROW_RANGE = 48
 local THROW_STEP = 4
 local THROW_DAMAGE = 18
 local THROW_HALF_SIZE = Vector3.new(3.5, 5, 3.5)
+local THROW_OUT_DURATION = 0.38
+local THROW_RETURN_SPEED = 126
+local THROW_MIN_RETURN_DURATION = 0.12
+local THROW_MAX_RETURN_DURATION = 0.42
+
+local PULL_STOP_DISTANCE = 5
+local PULL_MIN_SPEED = 42
+local PULL_MAX_SPEED = 92
+local PULL_TICK = 1 / 30
+local PULL_VERTICAL_GAIN = 4
+local PULL_MAX_VERTICAL_SPEED = 14
 
 local cooldowns: {[Player]: {[string]: number}} = {}
 
@@ -147,28 +159,152 @@ local function performSpin(player: Player)
 	end)
 end
 
+local function getLiveTargetState(model: Model): (Humanoid?, BasePart?)
+	if not model.Parent then return nil, nil end
+	local humanoid = model:FindFirstChildOfClass("Humanoid")
+	local root = model:FindFirstChild("HumanoidRootPart")
+	if not humanoid or humanoid.Health <= 0 or not root or not root:IsA("BasePart") then
+		return humanoid, nil
+	end
+	return humanoid, root
+end
+
+local function setServerOwnership(root: BasePart, serverOwned: boolean)
+	pcall(function()
+		if serverOwned then
+			root:SetNetworkOwner(nil)
+		else
+			root:SetNetworkOwnershipAuto()
+		end
+	end)
+end
+
+local function pullCaughtTarget(player: Player, target: Model, duration: number)
+	local targetHumanoid, targetRoot = getLiveTargetState(target)
+	if not targetHumanoid or not targetRoot or targetRoot.Anchored then return end
+
+	setServerOwnership(targetRoot, true)
+	local finishAt = os.clock() + duration
+
+	while os.clock() < finishAt do
+		local _, sourceHumanoid, sourceRoot = getCharacterState(player)
+		targetHumanoid, targetRoot = getLiveTargetState(target)
+		if not sourceHumanoid or not sourceRoot or not targetHumanoid or not targetRoot then
+			break
+		end
+		if targetRoot.Anchored then break end
+
+		local delta = sourceRoot.Position - targetRoot.Position
+		local horizontal = Vector3.new(delta.X, 0, delta.Z)
+		if horizontal.Magnitude <= PULL_STOP_DISTANCE then
+			targetRoot.AssemblyLinearVelocity = Vector3.new(0, targetRoot.AssemblyLinearVelocity.Y, 0)
+			break
+		end
+
+		local speed = math.clamp(horizontal.Magnitude * 3.2, PULL_MIN_SPEED, PULL_MAX_SPEED)
+		local vertical = math.clamp(delta.Y * PULL_VERTICAL_GAIN, -PULL_MAX_VERTICAL_SPEED, PULL_MAX_VERTICAL_SPEED)
+		targetRoot.AssemblyLinearVelocity = horizontal.Unit * speed + Vector3.new(0, vertical, 0)
+		task.wait(PULL_TICK)
+	end
+
+	local _, finalRoot = getLiveTargetState(target)
+	if finalRoot then
+		local velocity = finalRoot.AssemblyLinearVelocity
+		finalRoot.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
+		setServerOwnership(finalRoot, false)
+	end
+end
+
+local function didHookFromDamageResult(result: any): boolean
+	return type(result) == "table"
+		and type(result.damage) == "number"
+		and result.damage > 0
+		and result.blocked ~= true
+		and result.parried ~= true
+		and result.clashed ~= true
+		and result.dodged ~= true
+end
+
 local function performThrow(player: Player)
 	local character, _, root = getCharacterState(player)
 	if not character or not root then return end
+
 	local direction = horizontalFacing(root)
 	local origin = root.Position + Vector3.new(0, 1.5, 0)
 	local params = getOverlapParams(character)
-	character:SetAttribute("AttackActiveUntil", os.clock() + 0.55)
+	local outwardSteps = math.max(1, math.ceil(THROW_RANGE / THROW_STEP))
+	local outwardStepTime = THROW_OUT_DURATION / outwardSteps
+
+	character:SetAttribute("SpecialMoveActive", "scythe_throw")
+	character:SetAttribute("AttackActiveUntil", os.clock() + THROW_OUT_DURATION + THROW_MAX_RETURN_DURATION)
+
+	-- Keep the original start packet shape for compatibility. The client-side restorer
+	-- listens for a second return packet and keeps the held scythe hidden until then.
 	UseMove:FireAllClients("FX", "scythe_throw", player.UserId, origin, direction, THROW_RANGE)
 
-	for distance = THROW_STEP, THROW_RANGE, THROW_STEP do
-		if not canUseMove(player) then return end
-		local center = origin + direction * distance
-		local parts = workspace:GetPartBoundsInBox(CFrame.new(center), THROW_HALF_SIZE * 2, params)
-		local targets = findTargets(player, parts)
-		if #targets > 0 then
-			local humanoid = targets[1]:FindFirstChildOfClass("Humanoid")
-			if humanoid then
-				DamageHandler.ApplyDamage(humanoid, THROW_DAMAGE, player)
+	task.spawn(function()
+		local returnPosition = origin + direction * THROW_RANGE
+		local caughtTarget: Model? = nil
+
+		for step = 1, outwardSteps do
+			task.wait(outwardStepTime)
+
+			local currentCharacter, currentHumanoid, currentRoot = getCharacterState(player)
+			if currentCharacter ~= character or not currentHumanoid or not currentRoot then
+				UseMove:FireAllClients("FX", "scythe_throw_cancel", player.UserId)
+				return
 			end
+
+			local distance = math.min(THROW_RANGE, step * THROW_STEP)
+			local center = origin + direction * distance
+			returnPosition = center
+			local parts = workspace:GetPartBoundsInBox(CFrame.new(center), THROW_HALF_SIZE * 2, params)
+			local targets = findTargets(player, parts)
+			if #targets > 0 then
+				local target = targets[1]
+				local humanoid = target:FindFirstChildOfClass("Humanoid")
+				if humanoid then
+					local result = DamageHandler.ApplyDamage(humanoid, THROW_DAMAGE, player)
+					if didHookFromDamageResult(result) then
+						caughtTarget = target
+					end
+				end
+				-- Any actual contact makes the boomerang reverse. Successful defence prevents the pull.
+				break
+			end
+		end
+
+		local _, returnHumanoid, returnRoot = getCharacterState(player)
+		if not returnHumanoid or not returnRoot then
+			UseMove:FireAllClients("FX", "scythe_throw_cancel", player.UserId)
 			return
 		end
-	end
+
+		local returnDistance = (returnPosition - returnRoot.Position).Magnitude
+		local returnDuration = math.clamp(
+			returnDistance / THROW_RETURN_SPEED,
+			THROW_MIN_RETURN_DURATION,
+			THROW_MAX_RETURN_DURATION
+		)
+
+		UseMove:FireAllClients(
+			"FX",
+			"scythe_throw_return",
+			player.UserId,
+			returnPosition,
+			returnDuration
+		)
+
+		if caughtTarget then
+			pullCaughtTarget(player, caughtTarget, returnDuration)
+		else
+			task.wait(returnDuration)
+		end
+
+		if character.Parent and character:GetAttribute("SpecialMoveActive") == "scythe_throw" then
+			character:SetAttribute("SpecialMoveActive", nil)
+		end
+	end)
 end
 
 UseMove.OnServerEvent:Connect(function(player: Player, slotIndex: any)
