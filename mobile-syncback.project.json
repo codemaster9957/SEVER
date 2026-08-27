@@ -6,18 +6,50 @@
       "$className": "StarterPlayer",
       "StarterPlayerScripts": {
         "$className": "StarterPlayerScripts",
-        "$path": "migration/EditableClient/StarterPlayerScripts"
+        "SideScrollCamera": {"$path":"migration/EditableClient/StarterPlayerScripts/SideScrollCamera.client.luau"},
+        "GrapplingHookClient": {"$path":"migration/EditableClient/StarterPlayerScripts/GrapplingHookClient.client.luau"},
+        "ChallengeClient": {"$path":"migration/EditableClient/StarterPlayerScripts/ChallengeClient.client.luau"},
+        "BattleUIScript": {"$path":"migration/EditableClient/StarterPlayerScripts/BattleUIScript.client.luau"},
+        "DoubleJumpScript": {"$path":"migration/EditableClient/StarterPlayerScripts/DoubleJumpScript.client.luau"},
+        "BlockClient": {"$path":"migration/EditableClient/StarterPlayerScripts/BlockClient.client.luau"},
+        "SuperbulletClient": {"$path":"migration/EditableClient/StarterPlayerScripts/SuperbulletClient.client.luau"},
+        "MatchAudioManager": {"$path":"migration/EditableClient/StarterPlayerScripts/MatchAudioManager.client.luau"},
+        "CombatJuiceClient": {"$path":"migration/EditableClient/StarterPlayerScripts/CombatJuiceClient.client.luau"},
+        "WinstreakDisplay": {"$path":"migration/EditableClient/StarterPlayerScripts/WinstreakDisplay.client.luau"},
+        "RiftSpawnEffect": {"$path":"migration/EditableClient/StarterPlayerScripts/RiftSpawnEffect.client.luau"},
+        "AtmosphereManager": {"$path":"migration/EditableClient/StarterPlayerScripts/AtmosphereManager.client.luau"},
+        "MapVoteClient": {"$path":"migration/EditableClient/StarterPlayerScripts/MapVoteClient.client.luau"},
+        "BattleIntroUI": {"$path":"migration/EditableClient/StarterPlayerScripts/BattleIntroUI.client.luau"},
+        "BattleIntroClient": {"$path":"migration/EditableClient/StarterPlayerScripts/BattleIntroClient.client.luau"},
+        "dashScript": {"$path":"migration/EditableClient/StarterPlayerScripts/dashScript.client.luau"},
+        "SoundBridge": {"$path":"migration/EditableClient/StarterPlayerScripts/SoundBridge.client.luau"},
+        "MatchFinishClient": {"$path":"migration/EditableClient/StarterPlayerScripts/MatchFinishClient.client.luau"},
+        "MobileCombatController": {"$path":"migration/EditableClient/StarterPlayerScripts/MobileCombatController.client.luau"},
+        "SoulReapClient": {"$path":"migration/EditableClient/StarterPlayerScripts/SoulReapClient.client.luau"},
+        "TrainingDummyControlsUI": {"$path":"migration/EditableClient/StarterPlayerScripts/TrainingDummyControlsUI.client.luau"},
+        "ThrowingVFXClient": {"$path":"migration/EditableClient/StarterPlayerScripts/ThrowingVFXClient.client.luau"},
+        "TutorialClient": {"$path":"migration/EditableClient/StarterPlayerScripts/TutorialClient.client.luau"},
+        "MatchmakingClient": {"$path":"migration/EditableClient/StarterPlayerScripts/MatchmakingClient.client.luau"},
+        "RankedClient": {"$path":"migration/EditableClient/StarterPlayerScripts/RankedClient.client.luau"},
+        "Client": {"$path":"migration/EditableClient/StarterPlayerScripts/Client.client.luau"}
       },
       "StarterCharacterScripts": {
         "$className": "StarterCharacterScripts",
-        "$path": "migration/EditableClient/StarterCharacterScripts"
+        "SideScrollMovement": {"$path":"migration/EditableClient/StarterCharacterScripts/SideScrollMovement.client.luau"},
+        "DropThroughClient": {"$path":"migration/EditableClient/StarterCharacterScripts/DropThroughClient.client.luau"},
+        "AirRecoveryAndEdgeGrab": {"$path":"migration/EditableClient/StarterCharacterScripts/AirRecoveryAndEdgeGrab.client.luau"}
       }
     },
     "StarterPack": {
       "$className": "StarterPack",
       "scythe": {
         "$className": "Tool",
-        "$path": "migration/EditableClient/scythe"
+        "SpinClient": {"$path":"migration/EditableClient/scythe/SpinClient.client.luau"},
+        "Throw": {"$path":"migration/EditableClient/scythe/Throw.client.luau"},
+        "vfx+combo": {"$path":"migration/EditableClient/scythe/vfx_combo.client.luau"},
+        "idle+walking anims": {"$path":"migration/EditableClient/scythe/idle_walking_anims.client.luau"},
+        "ThrowServer": {"$path":"migration/EditableClient/scythe/ThrowServer.server.luau"},
+        "vfx": {"$path":"migration/EditableClient/scythe/vfx.server.luau"}
       }
     }
   },
