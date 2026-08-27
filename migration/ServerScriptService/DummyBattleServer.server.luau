@@ -24,6 +24,9 @@ local TrainingDummy = workspace:WaitForChild("training")
 
 local RESULT_DISPLAY_TIME = 1.5
 local HUD_UPDATE_INTERVAL = 0.1
+-- Older hidden HUD code still expects a positive duration. The server never counts
+-- this down; the training UI enhancer hides the clock completely.
+local TRAINING_COMPAT_DURATION = 86400
 
 -- [Player] = battleData
 local activeDummyBattles = {}
@@ -83,7 +86,6 @@ local function savePreferredLevel(player, level)
 	end)
 end
 
--- Searches recursively so arena spawns may be inside folders or models.
 local function findSpawn(arena, spawnName)
 	for _, descendant in ipairs(arena:GetDescendants()) do
 		if descendant:IsA("BasePart")
@@ -210,6 +212,12 @@ local function endDummyBattle(player, battle, winnerIsPlayer)
 		TrainingDummyAI.RecordRoundResult(battle.aiMemory, winnerIsPlayer == true)
 	end
 
+	if isValidPlayer(player) and DataService.IsPersistent(player) then
+		-- Save when a training session ends so Level 10's learning and the chosen
+		-- difficulty survive a rejoin even if the normal autosave has not run yet.
+		task.spawn(DataService.SaveProfile, player)
+	end
+
 	if activeDummyBattles[player] == battle then
 		activeDummyBattles[player] = nil
 	end
@@ -239,6 +247,36 @@ local function endDummyBattle(player, battle, winnerIsPlayer)
 			warn("[DummyBattleServer] Failed to reload " .. player.Name .. ": " .. tostring(reloadError))
 		end
 	end
+end
+
+local function startAIController(player, battle, level)
+	if battle.aiController then
+		battle.aiController:Destroy()
+		battle.aiController = nil
+	end
+
+	local root = battle.dummyClone and battle.dummyClone:FindFirstChild("HumanoidRootPart")
+	if root and root:IsA("BasePart") then
+		root.Anchored = level == 0
+		if level == 0 then
+			root.AssemblyLinearVelocity = Vector3.zero
+			root.AssemblyAngularVelocity = Vector3.zero
+		end
+	end
+
+	local aiSuccess, aiController = pcall(function()
+		return TrainingDummyCombatAI.new(player, battle, level, battle.aiMemory)
+	end)
+	if aiSuccess then
+		battle.aiController = aiController
+		return true
+	end
+
+	warn("[DummyBattleServer] Training AI failed to start: " .. tostring(aiController))
+	battle.dummyLevel = 0
+	battle.dummyClone:SetAttribute("TrainingLevel", 0)
+	if root and root:IsA("BasePart") then root.Anchored = true end
+	return false
 end
 
 local function startDummyBattle(player, arenaReference)
@@ -362,17 +400,7 @@ local function startDummyBattle(player, arenaReference)
 	local dummyTarget = spawn2.CFrame + Vector3.new(0, spawn2.Size.Y / 2 + 3, 0)
 	character:PivotTo(playerTarget)
 	dummyClone:PivotTo(dummyTarget)
-
-	local aiSuccess, aiController = pcall(function()
-		return TrainingDummyCombatAI.new(player, battle, preferredLevel, aiMemory)
-	end)
-	if aiSuccess then
-		battle.aiController = aiController
-	else
-		warn("[DummyBattleServer] Training AI failed to start: " .. tostring(aiController))
-		battle.dummyLevel = 0
-		dummyClone:SetAttribute("TrainingLevel", 0)
-	end
+	startAIController(player, battle, preferredLevel)
 
 	local function endBattle(winnerIsPlayer)
 		if not battle.finished then
@@ -420,14 +448,12 @@ local function startDummyBattle(player, arenaReference)
 		end
 	end)
 
-	-- Training is intentionally untimed. MatchDuration=0 is only a compatibility
-	-- value for older HUD code; TrainingNoTimer tells the enhancer to hide the timer.
 	safeFireClient(player, "InMatch", {
 		OpponentName = "Training Dummy",
 		OpponentUserId = 0,
 		PlayerUserId = player.UserId,
 		ArenaName = arena.Name,
-		MatchDuration = 0,
+		MatchDuration = TRAINING_COMPAT_DURATION,
 		TrainingNoTimer = true,
 		DummyLevel = battle.dummyLevel,
 	})
@@ -441,7 +467,7 @@ local function startDummyBattle(player, arenaReference)
 	safeFireClient(player, "Fighting", {
 		OpponentName = "Training Dummy",
 		OpponentUserId = 0,
-		MatchDuration = 0,
+		MatchDuration = TRAINING_COMPAT_DURATION,
 		TrainingNoTimer = true,
 		DummyLevel = battle.dummyLevel,
 	})
@@ -540,9 +566,10 @@ SetDummyLevelRemote.OnServerEvent:Connect(function(player, requestedLevel)
 	local level = TrainingDummyAI.ClampLevel(requestedLevel)
 	battle.dummyLevel = level
 	battle.dummyClone:SetAttribute("TrainingLevel", level)
-	if battle.aiController then
-		battle.aiController:SetLevel(level)
-	end
+
+	-- Recreate rather than mutate the controller so delayed attacks from the old level
+	-- see destroyed=true and cannot land after the player has selected a new level.
+	startAIController(player, battle, level)
 	savePreferredLevel(player, level)
 
 	-- Only the selected level is synchronized. Adaptive memory/counters never leave the server.
@@ -568,6 +595,7 @@ RespawnDummyRemote.OnServerEvent:Connect(function(player)
 	if root and root:IsA("BasePart") then
 		root.AssemblyLinearVelocity = Vector3.zero
 		root.AssemblyAngularVelocity = Vector3.zero
+		root.Anchored = battle.dummyLevel == 0
 	end
 end)
 
