@@ -82,7 +82,7 @@ local function stripRuntimeObjects(root: Instance)
 	end
 end
 
-local type VisualPart = {
+type VisualPart = {
 	clone: BasePart,
 	offset: CFrame,
 	source: BasePart,
