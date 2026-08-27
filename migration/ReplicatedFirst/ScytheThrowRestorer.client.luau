@@ -41,7 +41,6 @@ local function findScytheTool(player: Player): Tool?
 		end
 	end
 
-	-- Other players' Backpacks are not relied upon; the battle scythe should be equipped.
 	if player == localPlayer then
 		local backpack = player:FindFirstChildOfClass("Backpack")
 		if backpack then
@@ -127,6 +126,16 @@ local function makeVisual(tool: Tool, handle: BasePart): (Model?, {VisualPart})
 	end
 
 	model.Parent = workspace
+
+	local outline = Instance.new("Highlight")
+	outline.Name = "SEVER_ThrownScytheOutline"
+	outline.Adornee = model
+	outline.FillTransparency = 1
+	outline.OutlineColor = Color3.fromRGB(255, 35, 45)
+	outline.OutlineTransparency = 0
+	outline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
+	outline.Parent = model
+
 	return model, visualParts
 end
 
@@ -140,7 +149,6 @@ end
 
 local function destroyReplacementLine(instance: Instance)
 	if instance:IsA("BasePart") and instance.Name == "LoadoutThrowFX" then
-		-- The old loadout rewrite used a neon bar instead of the weapon model.
 		instance.Transparency = 1
 		instance:Destroy()
 	end
@@ -254,7 +262,6 @@ local function playThrow(player: Player, origin: Vector3, direction: Vector3, ra
 	}
 	activeThrows[userId] = state
 
-	-- This is intentionally held until cleanup after the RETURN phase.
 	setHeldScytheHidden(visualParts, true)
 
 	state.connection = RunService.RenderStepped:Connect(function()
@@ -270,7 +277,6 @@ local function playThrow(player: Player, origin: Vector3, direction: Vector3, ra
 			local alpha = math.clamp((now - state.startedAt) / THROW_OUT_DURATION, 0, 1)
 			position = state.startPosition:Lerp(state.endPosition, alpha)
 			if alpha >= 1 then
-				-- Hold at the endpoint until the server sends the authoritative return packet.
 				state.phase = "waiting"
 			end
 		elseif state.phase == "returning" then
@@ -293,7 +299,6 @@ local function playThrow(player: Player, origin: Vector3, direction: Vector3, ra
 		renderVisual(state, position, now)
 	end)
 
-	-- Never leave the held weapon locally hidden if a teleport/respawn interrupts packets.
 	task.delay(THROW_SAFETY_LIFETIME, function()
 		cleanupThrow(userId, token)
 	end)
