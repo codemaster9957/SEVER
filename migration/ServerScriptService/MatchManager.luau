@@ -21,6 +21,8 @@ local WinstreakData = require(ServerScriptService:WaitForChild("WinstreakData"))
 local OvertimeManager = require(ServerScriptService:WaitForChild("OvertimeManager"))
 local MatchStateController = require(ReplicatedStorage:WaitForChild("MatchStateController"))
 
+-- playerStates is authoritative match MEMBERSHIP only: "Lobby" or "InMatch".
+-- UI phases such as LoadingArena/Countdown/Fighting are sent to clients separately.
 local activeMatches = {}
 local playerStates = {}
 local endingMatches = {}
@@ -32,21 +34,28 @@ local matchMetadata = {}
 local MatchEndedSignal = Instance.new("BindableEvent")
 local arenaRandom = Random.new()
 
-local function isValidPlayer(player)
-	return player and player.Parent == Players
-end
-
 local ALL_ARENAS = {"Arena1", "Arena2", "Arena3", "Arena4", "Arena5"}
 local MAP_VOTE_TIMEOUT = 10
 local MATCH_DURATION = 90
 local TIMER_UPDATE_INTERVAL = 0.1
+local CHARACTER_READY_TIMEOUT = 3
+local TELEPORT_ATTEMPTS = 3
+local TELEPORT_VERIFY_RADIUS = 14
+
+local function isValidPlayer(player)
+	return typeof(player) == "Instance"
+		and player:IsA("Player")
+		and player.Parent == Players
+end
 
 local function getAvailableArena()
 	local available = {}
 	for _, name in ipairs(ALL_ARENAS) do
 		if not arenaLocks[name] then
 			local arena = ArenasFolder:FindFirstChild(name)
-			if arena then table.insert(available, name) end
+			if arena then
+				table.insert(available, name)
+			end
 		end
 	end
 	return available
@@ -66,12 +75,11 @@ function MatchManager.StartMapVote(p1, p2)
 	if not arenaName then return false end
 
 	if typeof(p2) == "table" and p2.IsDummy then
-		local result = _G.StartDummyBattle(p1, arenaName)
-		return result ~= false
+		local result = _G.StartDummyBattle and _G.StartDummyBattle(p1, arenaName)
+		return result == true
 	end
 
-	MatchManager.StartMatch(p1, p2, arenaName)
-	return true
+	return MatchManager.StartMatch(p1, p2, arenaName) == true
 end
 
 function MatchManager.GetAvailableArena()
@@ -89,18 +97,28 @@ function MatchManager.LockArena(arenaName)
 end
 
 function MatchManager.IsPlayerInMatch(player)
-	return playerStates[player] == "InMatch"
+	if not player then return false end
+	if playerStates[player] == "InMatch" or activeMatches[player] ~= nil then
+		return true
+	end
+	local character = player.Character
+	return character ~= nil and character:GetAttribute("InMatch") == true
 end
 
 function MatchManager.SetPlayerState(player, state)
-	playerStates[player] = state
+	if player then
+		playerStates[player] = state
+	end
 end
 
 function MatchManager.CanUseCombat(player)
-	return isValidPlayer(player)
-		and playerStates[player] == "InMatch"
-		and player.Character
-		and player.Character:GetAttribute("InMatch") == true
+	if not isValidPlayer(player) or not MatchManager.IsPlayerInMatch(player) then
+		return false
+	end
+	local character = player.Character
+	return character ~= nil
+		and character:GetAttribute("InMatch") == true
+		and character:GetAttribute("CanAttack") ~= false
 end
 
 function MatchManager.GetOpponent(player)
@@ -108,9 +126,9 @@ function MatchManager.GetOpponent(player)
 end
 
 local function findSpawn(arena, spawnName)
-	for _, child in ipairs(arena:GetChildren()) do
-		if child:IsA("BasePart") and string.sub(child.Name, 1, #spawnName) == spawnName then
-			return child
+	for _, descendant in ipairs(arena:GetDescendants()) do
+		if descendant:IsA("BasePart") and string.sub(descendant.Name, 1, #spawnName) == spawnName then
+			return descendant
 		end
 	end
 	return nil
@@ -122,44 +140,109 @@ local function safeFireClient(player, state, data)
 	end
 end
 
+-- IMPORTANT: this function is client/UI state only. It must never overwrite
+-- authoritative playerStates, otherwise IsPlayerInMatch becomes false during
+-- LoadingArena/BattleIntro/Countdown/Fighting.
 local function setMatchState(p1, p2, state, data)
 	if isValidPlayer(p1) then
-		playerStates[p1] = state
 		safeFireClient(p1, state, data)
 	end
 	if isValidPlayer(p2) then
-		playerStates[p2] = state
 		safeFireClient(p2, state, data)
 	end
 end
 
-local function teleportPlayer(player, spawnPart)
-	if not isValidPlayer(player) or not spawnPart then return end
-	local character = player.Character
-	if not character then return end
+local function getReadyCharacter(player, timeoutSeconds)
+	local deadline = os.clock() + (timeoutSeconds or CHARACTER_READY_TIMEOUT)
 
-	local root = character:FindFirstChild("HumanoidRootPart") or character:WaitForChild("HumanoidRootPart", 5)
-	if root then
-		local targetCFrame = spawnPart.CFrame + Vector3.new(0, spawnPart.Size.Y / 2 + 3, 0)
+	repeat
+		if not isValidPlayer(player) then
+			return nil
+		end
+
+		local character = player.Character
+		if character and character.Parent then
+			local humanoid = character:FindFirstChildOfClass("Humanoid")
+			local root = character:FindFirstChild("HumanoidRootPart")
+			if humanoid and root and humanoid.Health > 0 then
+				return character, humanoid, root
+			end
+		end
+
+		task.wait(0.05)
+	until os.clock() >= deadline
+
+	return nil
+end
+
+local function targetCFrameForSpawn(spawnPart)
+	return spawnPart.CFrame + Vector3.new(0, spawnPart.Size.Y / 2 + 3, 0)
+end
+
+local function teleportPlayer(player, spawnPart)
+	if not isValidPlayer(player) or not spawnPart or not spawnPart:IsA("BasePart") then
+		return false
+	end
+
+	local targetCFrame = targetCFrameForSpawn(spawnPart)
+
+	for _ = 1, TELEPORT_ATTEMPTS do
+		local character, humanoid, root = getReadyCharacter(player, CHARACTER_READY_TIMEOUT)
+		if not character or not humanoid or not root then
+			continue
+		end
+
 		character:PivotTo(targetCFrame)
+		root.AssemblyLinearVelocity = Vector3.zero
+		root.AssemblyAngularVelocity = Vector3.zero
+
 		if character:GetAttribute("InMatch") then
 			character:SetAttribute("ArenaZ", spawnPart.Position.Z)
 		else
 			character:SetAttribute("ArenaZ", nil)
 		end
+
+		task.wait(0.08)
+
+		if player.Character == character and character.Parent then
+			local distance = (character:GetPivot().Position - targetCFrame.Position).Magnitude
+			if distance <= TELEPORT_VERIFY_RADIUS then
+				return true
+			end
+		end
 	end
+
+	warn(string.format("[MatchManager] Failed to place %s at %s", player.Name, spawnPart:GetFullName()))
+	return false
+end
+
+local function ensureAtSpawn(player, spawnPart)
+	if not isValidPlayer(player) or not spawnPart then return false end
+	local character = player.Character
+	if character and character.Parent then
+		local target = targetCFrameForSpawn(spawnPart).Position
+		if (character:GetPivot().Position - target).Magnitude <= TELEPORT_VERIFY_RADIUS then
+			return true
+		end
+	end
+	return teleportPlayer(player, spawnPart)
 end
 
 local function setInMatch(player, status)
 	if not isValidPlayer(player) then return end
+	playerStates[player] = status and "InMatch" or "Lobby"
+
 	local character = player.Character
 	if character then
-		character:SetAttribute("InMatch", status)
-		if not status then character:SetAttribute("ArenaZ", nil) end
+		character:SetAttribute("InMatch", status == true)
+		if not status then
+			character:SetAttribute("ArenaZ", nil)
+		end
 	end
 end
 
 local function setControllable(player, controllable)
+	if not isValidPlayer(player) then return end
 	local character = player.Character
 	if not character then return end
 	local humanoid = character:FindFirstChildOfClass("Humanoid")
@@ -173,6 +256,45 @@ local function setControllable(player, controllable)
 	end
 	character:SetAttribute("CanAttack", controllable)
 	character:SetAttribute("CanBlock", controllable)
+end
+
+local function clearMatchReferences(p1, p2, arenaName)
+	for _, player in ipairs({p1, p2}) do
+		if player then
+			activeMatches[player] = nil
+			matchMetadata[player] = nil
+			matchArenaByPlayer[player] = nil
+			playerStates[player] = "Lobby"
+			endingMatches[player] = nil
+			DamageHandler.RemovePlayer(player)
+		end
+	end
+	if arenaName then
+		arenaLocks[arenaName] = false
+	end
+end
+
+local function abortMatchStart(p1, p2, arenaName, reason)
+	warn(string.format("[MatchManager] Cancelling match start: %s", tostring(reason)))
+
+	for _, player in ipairs({p1, p2}) do
+		if isValidPlayer(player) then
+			setInMatch(player, false)
+			setControllable(player, true)
+			safeFireClient(player, "Lobby", { Reason = reason })
+		end
+	end
+
+	clearMatchReferences(p1, p2, arenaName)
+
+	-- If one player reached the arena before the other failed, return them safely.
+	for _, player in ipairs({p1, p2}) do
+		if isValidPlayer(player) then
+			task.spawn(function()
+				teleportPlayer(player, LobbySpawn)
+			end)
+		end
+	end
 end
 
 function MatchManager.SetMatchMetadata(p1, p2, matchId, ranked)
@@ -191,7 +313,13 @@ end
 
 function MatchManager.StartMatch(p1, p2, arenaName, forceOvertime)
 	if not isValidPlayer(p1) or not isValidPlayer(p2) or p1 == p2 then return false end
-	if playerStates[p1] == "InMatch" or playerStates[p2] == "InMatch" then return false end
+	if MatchManager.IsPlayerInMatch(p1) or MatchManager.IsPlayerInMatch(p2) then return false end
+
+	-- Do not reserve an arena until both rigs are actually ready. Slow mobile joins
+	-- and respawns can otherwise produce a real match whose character stays in Lobby.
+	if not getReadyCharacter(p1, CHARACTER_READY_TIMEOUT) or not getReadyCharacter(p2, CHARACTER_READY_TIMEOUT) then
+		return false
+	end
 
 	local arena = arenaName and ArenasFolder:FindFirstChild(arenaName)
 	if not arena then
@@ -202,37 +330,65 @@ function MatchManager.StartMatch(p1, p2, arenaName, forceOvertime)
 
 	local s1 = findSpawn(arena, "ArenaSpawn1")
 	local s2 = findSpawn(arena, "ArenaSpawn2")
-	if not s1 or not s2 then return false end
+	if not s1 or not s2 then
+		warn("[MatchManager] Arena is missing ArenaSpawn1/ArenaSpawn2: " .. arena:GetFullName())
+		return false
+	end
 
 	arenaLocks[arena.Name] = true
 	activeMatches[p1] = p2
 	activeMatches[p2] = p1
 	matchArenaByPlayer[p1] = arena.Name
 	matchArenaByPlayer[p2] = arena.Name
+	setInMatch(p1, true)
+	setInMatch(p2, true)
+
+	-- Freeze first so client movement/thumbstick scripts cannot race the server teleport.
+	setControllable(p1, false)
+	setControllable(p2, false)
+	setMatchState(p1, p2, "LoadingArena", { ArenaName = arena.Name })
+
+	local p1Placed = teleportPlayer(p1, s1)
+	local p2Placed = teleportPlayer(p2, s2)
+	if not p1Placed or not p2Placed then
+		abortMatchStart(p1, p2, arena.Name, "ArenaTeleportFailed")
+		return false
+	end
 
 	DamageHandler.InitializePlayerHealth(p1)
 	DamageHandler.InitializePlayerHealth(p2)
-	setInMatch(p1, true)
-	setInMatch(p2, true)
-	setMatchState(p1, p2, "LoadingArena", { ArenaName = arena.Name })
 
-	teleportPlayer(p1, s1)
-	teleportPlayer(p2, s2)
-	task.wait(1)
+	task.wait(0.75)
+
+	-- Verify again after replication has had time to settle. This catches a client
+	-- controller snapping a player back or a character being replaced mid-transition.
+	if not ensureAtSpawn(p1, s1) or not ensureAtSpawn(p2, s2) then
+		abortMatchStart(p1, p2, arena.Name, "ArenaPlacementLost")
+		return false
+	end
 
 	setMatchState(p1, p2, "BattleIntro", {
 		p1 = { Name = p1.Name, UserId = p1.UserId },
 		p2 = { Name = p2.Name, UserId = p2.UserId },
 	})
-	setControllable(p1, false)
-	setControllable(p2, false)
 
 	task.wait(4)
+	if not isValidPlayer(p1) or not isValidPlayer(p2) then
+		abortMatchStart(p1, p2, arena.Name, "PlayerLeftDuringIntro")
+		return false
+	end
+
 	setMatchState(p1, p2, "Countdown")
 	task.wait(3.5)
 
 	if not isValidPlayer(p1) or not isValidPlayer(p2) then
-		MatchManager.EndMatch(p1, p2, nil, arena.Name)
+		abortMatchStart(p1, p2, arena.Name, "PlayerLeftDuringCountdown")
+		return false
+	end
+
+	-- Last guard before enabling damage/movement: a fight must never start in Lobby.
+	if not ensureAtSpawn(p1, s1) or not ensureAtSpawn(p2, s2) then
+		abortMatchStart(p1, p2, arena.Name, "ArenaPlacementLostBeforeFight")
 		return false
 	end
 
@@ -269,7 +425,6 @@ function MatchManager.StartMatch(p1, p2, arenaName, forceOvertime)
 		local h1 = DamageHandler.GetPlayerHealth(p1)
 		local h2 = DamageHandler.GetPlayerHealth(p2)
 
-		-- Health is event-like data: only send it when a value actually changes.
 		if h1 ~= lastH1 or h2 ~= lastH2 then
 			lastH1, lastH2 = h1, h2
 			safeFireClient(p1, "UpdateHealth", { Health = h1, OpponentHealth = h2 })
@@ -348,10 +503,12 @@ function MatchManager.EndMatch(p1, p2, winner, arenaName)
 	if p1 then playerStates[p1] = "Lobby" end
 	if p2 then playerStates[p2] = "Lobby" end
 	if arenaName then arenaLocks[arenaName] = false end
+	DamageHandler.RemovePlayer(p1)
+	DamageHandler.RemovePlayer(p2)
 
 	task.delay(3, function()
-		teleportPlayer(p1, LobbySpawn)
-		teleportPlayer(p2, LobbySpawn)
+		if isValidPlayer(p1) then teleportPlayer(p1, LobbySpawn) end
+		if isValidPlayer(p2) then teleportPlayer(p2, LobbySpawn) end
 		endingMatches[p1] = nil
 		endingMatches[p2] = nil
 	end)
