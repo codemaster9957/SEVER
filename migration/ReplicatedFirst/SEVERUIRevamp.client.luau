@@ -71,7 +71,6 @@ local function findThemeButton(): GuiButton?
 	local best: GuiButton? = nil
 	local scoreBest = -math.huge
 	for _, descendant in ipairs(playerGui:GetDescendants()) do
-		-- Hidden controls count: training settings are normally invisible in Lobby.
 		if descendant:IsA("GuiButton") and isTrainingButton(descendant) then
 			local score = 10
 			if string.find(lower(visibleText(descendant)), "respawn", 1, true) then score += 20 end
@@ -166,7 +165,6 @@ local function refreshHealthContainers(template: GuiButton?)
 	for _, descendant in ipairs(playerGui:GetDescendants()) do
 		if descendant:IsA("GuiObject") and descendant.Visible then
 			local name = lower(descendant.Name)
-			-- Only the outer containers get themed. Never recolour HealthFill/Bar children.
 			if string.find(name, "playerdisplay", 1, true) or string.find(name, "opponentdisplay", 1, true) then
 				applySurface(descendant, template, false)
 			end
