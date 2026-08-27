@@ -195,7 +195,16 @@ local function cast(player)
 	activeCasts[player] = nil
 end
 
-request.OnServerEvent:Connect(function(player)
+local function isEquippedSoulReapSlot(player, slotIndex)
+	local slot = tonumber(slotIndex)
+	if slot ~= 1 and slot ~= 2 then return false end
+	return player:GetAttribute("EquippedMove" .. tostring(slot)) == "soul_reap"
+end
+
+request.OnServerEvent:Connect(function(player, slotIndex)
+	-- Reject legacy direct Soul Reap input. The client must identify the equipped
+	-- loadout slot, and that server-owned slot must actually contain Soul Reap.
+	if not isEquippedSoulReapSlot(player, slotIndex) then return end
 	task.spawn(cast, player)
 end)
 
