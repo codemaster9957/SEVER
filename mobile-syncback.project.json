@@ -1,0 +1,29 @@
+{
+  "name": "SEVER Mobile Source Syncback",
+  "tree": {
+    "$className": "DataModel",
+    "StarterPlayer": {
+      "$className": "StarterPlayer",
+      "StarterPlayerScripts": {
+        "$className": "StarterPlayerScripts",
+        "$path": "migration/EditableClient/StarterPlayerScripts"
+      },
+      "StarterCharacterScripts": {
+        "$className": "StarterCharacterScripts",
+        "$path": "migration/EditableClient/StarterCharacterScripts"
+      }
+    },
+    "StarterPack": {
+      "$className": "StarterPack",
+      "scythe": {
+        "$className": "Tool",
+        "$path": "migration/EditableClient/scythe"
+      }
+    }
+  },
+  "syncbackRules": {
+    "syncCurrentCamera": false,
+    "syncUnscriptable": false,
+    "ignoreReferents": true
+  }
+}
