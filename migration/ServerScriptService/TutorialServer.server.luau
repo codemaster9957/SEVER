@@ -1,6 +1,5 @@
 --!strict
--- TutorialServer: Detects first-time players and walks them through combat basics
--- using the existing training dummy. Requires successful actions, not just text.
+-- TutorialServer: server-verified combat tutorial with mobile-compatible input handling.
 
 local Players = game:GetService("Players")
 local ReplicatedStorage = game:GetService("ReplicatedStorage")
@@ -12,7 +11,6 @@ local CompleteStep = TutorialEvents:WaitForChild("CompleteStep")
 local SkipTutorial = TutorialEvents:WaitForChild("SkipTutorial")
 local ReplayTutorial = TutorialEvents:WaitForChild("ReplayTutorial")
 local TutorialStateUpdate = TutorialEvents:WaitForChild("TutorialStateUpdate")
-local TutorialActionDetected = TutorialEvents:WaitForChild("TutorialActionDetected")
 local TutorialComplete = TutorialEvents:WaitForChild("TutorialComplete")
 
 local GrappleEvents = ReplicatedStorage:WaitForChild("GrappleEvents")
@@ -36,7 +34,6 @@ local STEPS = {
 	{ Id = "special", Name = "Soul Reap", Instruction = "Use your Soul Reap special! Press C (or tap MOVE 1)." },
 }
 
--- [Player] = { currentStep = number, active = bool, dummyBattleActive = bool }
 local tutorialStates = {}
 
 local function isValidPlayer(player)
@@ -50,8 +47,13 @@ local function fireState(player, state)
 end
 
 local function getProfile(player)
-	local profile = DataService.GetProfile(player)
-	return profile
+	return DataService.GetProfile(player)
+end
+
+local function saveProfile(player)
+	if isValidPlayer(player) then
+		task.spawn(DataService.SaveProfile, player)
+	end
 end
 
 local function isTutorialCompleted(player)
@@ -59,69 +61,106 @@ local function isTutorialCompleted(player)
 	return profile and profile.TutorialCompleted == true
 end
 
-local function isTutorialSkipped(player)
-	local profile = getProfile(player)
-	return profile and profile.TutorialSkipped == true
-end
-
 local function setTutorialCompleted(player, completed)
 	local profile = getProfile(player)
-	if profile then
-		profile.TutorialCompleted = completed
-	end
+	if profile then profile.TutorialCompleted = completed end
 end
 
 local function setTutorialSkipped(player, skipped)
 	local profile = getProfile(player)
-	if profile then
-		profile.TutorialSkipped = skipped
-	end
+	if profile then profile.TutorialSkipped = skipped end
 end
 
-local function giveReward(player)
-	DataService.AddGold(player, TUTORIAL_REWARD_GOLD)
-	DataService.AddClawTokens(player, TUTORIAL_REWARD_TOKENS)
+local function giveRewardOnce(player)
+	local profile = getProfile(player)
+	local goldReward = 0
+	local tokenReward = 0
+
+	if profile and profile.TutorialRewardClaimed ~= true then
+		-- Set the claim flag before changing balances so replay/spam cannot race a second grant.
+		profile.TutorialRewardClaimed = true
+		DataService.AddGold(player, TUTORIAL_REWARD_GOLD)
+		DataService.AddClawTokens(player, TUTORIAL_REWARD_TOKENS)
+		goldReward = TUTORIAL_REWARD_GOLD
+		tokenReward = TUTORIAL_REWARD_TOKENS
+		saveProfile(player)
+	end
+
 	if isValidPlayer(player) then
 		TutorialComplete:FireClient(player, {
-			GoldReward = TUTORIAL_REWARD_GOLD,
-			TokenReward = TUTORIAL_REWARD_TOKENS,
+			GoldReward = goldReward,
+			TokenReward = tokenReward,
+			AlreadyClaimed = goldReward == 0 and tokenReward == 0,
 		})
 	end
 end
 
-local function startTutorialForPlayer(player)
-	if not isValidPlayer(player) then return end
-	if tutorialStates[player] and tutorialStates[player].active then return end
+local function sendCurrentStep(player)
+	local state = tutorialStates[player]
+	if not state or not state.active then return end
+	local step = STEPS[state.currentStep]
+	if not step then return end
 
-	-- Don't start if already completed and not replaying
-	if isTutorialCompleted(player) and not isTutorialSkipped(player) then
-		return
+	fireState(player, {
+		Active = true,
+		CurrentStep = state.currentStep,
+		TotalSteps = #STEPS,
+		StepId = step.Id,
+		StepName = step.Name,
+		Instruction = step.Instruction,
+		Replay = state.replay == true,
+	})
 end
+
+local function startTutorialForPlayer(player, replay)
+	if not isValidPlayer(player) then return false end
+	if tutorialStates[player] and tutorialStates[player].active then return false end
+	if MatchManager.IsPlayerInMatch(player) then return false end
+	if not replay and isTutorialCompleted(player) then return false end
+
+	local arenaName = MatchManager.GetAvailableArena()
+	if not arenaName or not _G.StartDummyBattle then
+		fireState(player, { Active = false, Error = "No practice arena available" })
+		return false
+	end
+
+	local started = _G.StartDummyBattle(player, arenaName)
+	if started == false then
+		fireState(player, { Active = false, Error = "Unable to start practice battle" })
+		return false
+	end
 
 	tutorialStates[player] = {
 		currentStep = 1,
 		active = true,
-		dummyBattleActive = false,
+		dummyBattleActive = true,
+		replay = replay == true,
+		lastDummyHealth = nil,
 	}
 
-	-- Start a dummy battle for the tutorial
-	local arenaName = MatchManager.GetAvailableArena()
-	if arenaName then
-		local result = _G.StartDummyBattle(player, arenaName)
-		if result then
-			tutorialStates[player].dummyBattleActive = true
-		end
-	end
+	sendCurrentStep(player)
+	return true
+end
 
-	-- Send initial tutorial state to client
+local function finishTutorial(player, state)
+	state.active = false
+	setTutorialCompleted(player, true)
+	setTutorialSkipped(player, false)
+	giveRewardOnce(player)
+	saveProfile(player)
+
 	fireState(player, {
-		Active = true,
-		CurrentStep = 1,
-		TotalSteps = #STEPS,
-		StepId = STEPS[1].Id,
-		StepName = STEPS[1].Name,
-		Instruction = STEPS[1].Instruction,
+		Active = false,
+		Completed = true,
+		Replay = state.replay == true,
 	})
+
+	-- End from the server API. RemoteEvent:FireServer cannot be called by a server Script.
+	task.delay(2, function()
+		if isValidPlayer(player) and _G.EndDummyBattle then
+			_G.EndDummyBattle(player)
+		end
+	end)
 end
 
 local function advanceStep(player)
@@ -129,208 +168,138 @@ local function advanceStep(player)
 	if not state or not state.active then return end
 
 	state.currentStep += 1
-
+	state.lastDummyHealth = nil
 	if state.currentStep > #STEPS then
-		-- Tutorial complete!
-		state.active = false
-		setTutorialCompleted(player, true)
-		giveReward(player)
-
-		-- End the dummy battle after a short delay
-		task.delay(3, function()
-			if isValidPlayer(player) then
-				local ReturnToLobby = ReplicatedStorage.MatchEvents.TrainingDummyControls.ReturnToLobby
-				ReturnToLobby:FireServer() -- This won't work from server; use the global
-			end
-		end)
-
-		fireState(player, {
-			Active = false,
-			Completed = true,
-		})
-	else
-		local step = STEPS[state.currentStep]
-		fireState(player, {
-			Active = true,
-			CurrentStep = state.currentStep,
-			TotalSteps = #STEPS,
-			StepId = step.Id,
-			StepName = step.Name,
-			Instruction = step.Instruction,
-		})
+		finishTutorial(player, state)
+		return
 	end
+
+	sendCurrentStep(player)
 end
 
--- Detect player actions during tutorial
 local function onActionDetected(player, actionType)
 	local state = tutorialStates[player]
 	if not state or not state.active then return end
-
 	local currentStep = STEPS[state.currentStep]
-	if not currentStep then return end
-
-	if currentStep.Id == actionType then
-		-- Verify the action matches the current step
+	if currentStep and currentStep.Id == actionType then
 		advanceStep(player)
 	end
 end
 
--- Listen for combat actions from existing systems
--- Attack: detected via DamageHandler (we hook into the dummy taking damage)
--- We'll use a different approach - listen for the dummy's health decreasing
-
--- Block: listen for BlockRemote
-BlockRemote.OnServerEvent:Connect(function(player, action, ...)
-	if action == "Start" then
+-- BlockServer's canonical protocol is boolean. "Start" remains accepted for older clients.
+BlockRemote.OnServerEvent:Connect(function(player, status)
+	if status == true or status == "Start" then
 		local state = tutorialStates[player]
-		if state and state.active then
-			local currentStep = STEPS[state.currentStep]
-			if currentStep and currentStep.Id == "block" then
-				-- Check if block was successful (parry or block caught an attack)
-				-- For tutorial purposes, any block attempt counts
-				task.delay(0.3, function()
-					onActionDetected(player, "block")
-				end)
-			end
+		local step = state and STEPS[state.currentStep]
+		if step and step.Id == "block" then
+			onActionDetected(player, "block")
 		end
 	end
 end)
 
--- Dash: listen for DashRequest
-DashRequest.OnServerEvent:Connect(function(player, ...)
+DashRequest.OnServerEvent:Connect(function(player)
 	local state = tutorialStates[player]
-	if state and state.active then
-		local currentStep = STEPS[state.currentStep]
-		if currentStep and currentStep.Id == "dash" then
-			onActionDetected(player, "dash")
-		end
+	local step = state and STEPS[state.currentStep]
+	if step and step.Id == "dash" then
+		onActionDetected(player, "dash")
 	end
 end)
 
--- Grapple: listen for GrappleRequest
-GrappleRequest.OnServerEvent:Connect(function(player, ...)
+GrappleRequest.OnServerEvent:Connect(function(player)
 	local state = tutorialStates[player]
-	if state and state.active then
-		local currentStep = STEPS[state.currentStep]
-		if currentStep and currentStep.Id == "grapple" then
-			onActionDetected(player, "grapple")
-		end
+	local step = state and STEPS[state.currentStep]
+	if step and step.Id == "grapple" then
+		onActionDetected(player, "grapple")
 	end
 end)
 
--- Soul Reap: listen for SoulReapRequest
-SoulReapRequest.OnServerEvent:Connect(function(player, ...)
+SoulReapRequest.OnServerEvent:Connect(function(player)
 	local state = tutorialStates[player]
-	if state and state.active then
-		local currentStep = STEPS[state.currentStep]
-		if currentStep and currentStep.Id == "special" then
-			onActionDetected(player, "special")
-		end
+	local step = state and STEPS[state.currentStep]
+	if step and step.Id == "special" then
+		onActionDetected(player, "special")
 	end
 end)
 
--- Attack detection: monitor dummy health in tutorial battles
--- We'll check periodically if the dummy took damage during the attack step
+-- Attack completion is verified by actual dummy health loss, not a trusted client event.
 task.spawn(function()
 	while true do
-		task.wait(0.2)
+		task.wait(0.15)
 		for player, state in pairs(tutorialStates) do
-			if state and state.active and isValidPlayer(player) then
-				local currentStep = STEPS[state.currentStep]
-				if currentStep and currentStep.Id == "attack" then
-					-- Check if the dummy's health decreased
-					local dummyBattle = _G.GetActiveDummyBattle and _G.GetActiveDummyBattle(player)
-					if dummyBattle and dummyBattle.dummyHumanoid then
-						local currentHealth = dummyBattle.dummyHumanoid.Health
-						if not state.lastDummyHealth then
-							state.lastDummyHealth = currentHealth
-						elseif currentHealth < state.lastDummyHealth then
-							state.lastDummyHealth = currentHealth
+			if state.active and isValidPlayer(player) then
+				local step = STEPS[state.currentStep]
+				if step and step.Id == "attack" then
+					local battle = _G.GetActiveDummyBattle and _G.GetActiveDummyBattle(player)
+					local humanoid = battle and battle.dummyHumanoid
+					if humanoid and humanoid.Parent then
+						local health = humanoid.Health
+						if state.lastDummyHealth and health < state.lastDummyHealth then
 							onActionDetected(player, "attack")
 						else
-							state.lastDummyHealth = currentHealth
+							state.lastDummyHealth = health
 						end
 					end
 				end
-				end
 			end
+		end
 	end
 end)
 
--- Client requests to complete a step (for client-detected actions like attack hit)
-CompleteStep.OnServerEvent:Connect(function(player, stepId)
-	local state = tutorialStates[player]
-	if not state or not state.active then return end
-
-	local currentStep = STEPS[state.currentStep]
-	if currentStep and currentStep.Id == stepId then
-		onActionDetected(player, stepId)
-	end
+-- Legacy clients may still fire CompleteStep. Never trust it for progression;
+-- all five tutorial actions are now independently verified by the server above.
+CompleteStep.OnServerEvent:Connect(function(_player, _stepId)
+	return
 end)
 
--- Skip tutorial
+StartTutorial.OnServerEvent:Connect(function(player)
+	startTutorialForPlayer(player, false)
+end)
+
 SkipTutorial.OnServerEvent:Connect(function(player)
 	local state = tutorialStates[player]
-	if not state then return end
+	if not state or not state.active then return end
 
 	state.active = false
 	setTutorialSkipped(player, true)
 	setTutorialCompleted(player, true)
+	saveProfile(player)
 
-	-- End dummy battle if active
-	if state.dummyBattleActive then
-		local ReturnToLobbyRemote = ReplicatedStorage.MatchEvents.TrainingDummyControls.ReturnToLobby
-		-- We need to end the battle from server side
-		-- The DummyBattleServer handles ReturnToLobby via OnServerEvent, but we can call the global
-		if _G.EndDummyBattle then
-			_G.EndDummyBattle(player)
-		end
+	if state.dummyBattleActive and _G.EndDummyBattle then
+		_G.EndDummyBattle(player)
 	end
 
 	tutorialStates[player] = nil
 	fireState(player, { Active = false, Skipped = true })
 end)
 
--- Replay tutorial
 ReplayTutorial.OnServerEvent:Connect(function(player)
-	if not isValidPlayer(player) then return end
-	if MatchManager.IsPlayerInMatch(player) then return end
-
+	if not isValidPlayer(player) or MatchManager.IsPlayerInMatch(player) then return end
 	tutorialStates[player] = nil
-	startTutorialForPlayer(player)
+	startTutorialForPlayer(player, true)
 end)
 
--- Detect first-time players on join
 Players.PlayerAdded:Connect(function(player)
-	-- Wait for profile to load
 	task.wait(2)
-
 	if not isValidPlayer(player) then return end
 
 	local profile = getProfile(player)
-	if not profile then return end
+	if not profile or profile.TutorialCompleted or profile.TutorialSkipped then return end
 
-	-- First-time player: never completed and never skipped
-	if not profile.TutorialCompleted and not profile.TutorialSkipped then
-		-- Wait for character to load
-		player.CharacterAdded:Connect(function()
-			task.wait(1)
-			startTutorialForPlayer(player)
-		end)
+	player.CharacterAdded:Connect(function()
+		task.wait(1)
+		startTutorialForPlayer(player, false)
+	end)
 
-		if player.Character then
-			task.wait(1)
-			startTutorialForPlayer(player)
-		end
+	if player.Character then
+		task.wait(1)
+		startTutorialForPlayer(player, false)
 	end
 end)
 
--- Cleanup on leave
 Players.PlayerRemoving:Connect(function(player)
 	tutorialStates[player] = nil
 end)
 
--- Expose globals for DummyBattleServer integration
 _G.TutorialServer_States = tutorialStates
 _G.TutorialServer_AdvanceStep = advanceStep
 
