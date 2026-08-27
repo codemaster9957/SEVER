@@ -1,6 +1,5 @@
 local DataStoreService = game:GetService("DataStoreService")
 local Players = game:GetService("Players")
-local RunService = game:GetService("RunService")
 
 local DATA_STORE_NAME = "ScythePlayerData_v1"
 local AUTO_SAVE_INTERVAL = 120
@@ -12,13 +11,14 @@ local DataService = {}
 
 local profiles = {}
 local profileLoaded = {}
+local profileLoadFailed = {}
+local saving = {}
 
 local DEFAULT_PROFILE = {
 	OwnedItems = {},
 	OwnedEmotes = {},
 	Gold = 500,
 	ClawTokens = 0,
-	OwnedItems = {},
 	EquippedSkin = nil,
 	EquippedMove1 = nil,
 	EquippedMove2 = nil,
@@ -31,11 +31,11 @@ local DEFAULT_PROFILE = {
 	TotalClawPlays = 0,
 }
 
-local function deepCopy(t)
-	if type(t) ~= "table" then return t end
+local function deepCopy(value)
+	if type(value) ~= "table" then return value end
 	local copy = {}
-	for k, v in pairs(t) do
-		copy[k] = deepCopy(v)
+	for key, child in pairs(value) do
+		copy[key] = deepCopy(child)
 	end
 	return copy
 end
@@ -60,9 +60,34 @@ local function getKey(player)
 	return "Player_" .. player.UserId
 end
 
+local function normalizeGold(amount)
+	amount = tonumber(amount) or 0
+	if amount ~= amount or amount == math.huge or amount == -math.huge then
+		amount = 0
+	end
+	return math.max(0, math.floor(amount))
+end
+
+local function syncGoldDisplay(player, profile)
+	if not player or player.Parent ~= Players or not profile then return end
+
+	local goldAmount = normalizeGold(profile.Gold)
+	profile.Gold = goldAmount
+	player:SetAttribute("Gold", goldAmount)
+
+	local leaderstats = player:FindFirstChild("leaderstats")
+	local gold = leaderstats and leaderstats:FindFirstChild("Gold")
+	if gold and gold:IsA("IntValue") and gold.Value ~= goldAmount then
+		gold.Value = goldAmount
+	end
+end
+
 function DataService.LoadProfile(player)
 	if profiles[player] then
 		return profiles[player]
+	end
+	if profileLoadFailed[player] then
+		return nil
 	end
 
 	local key = getKey(player)
@@ -70,6 +95,8 @@ function DataService.LoadProfile(player)
 	local success = false
 
 	for attempt = 1, MAX_RETRIES do
+		if player.Parent ~= Players then return nil end
+
 		local ok, result = pcall(function()
 			return dataStore:GetAsync(key)
 		end)
@@ -77,20 +104,27 @@ function DataService.LoadProfile(player)
 			data = result
 			success = true
 			break
-		else
-			warn("[DataService] Load attempt " .. attempt .. " failed for " .. player.Name .. ": " .. tostring(result))
-			if attempt < MAX_RETRIES then
-				task.wait(2 ^ attempt)
-			end
+		end
+
+		warn("[DataService] Load attempt " .. attempt .. " failed for " .. player.Name .. ": " .. tostring(result))
+		if attempt < MAX_RETRIES then
+			task.wait(2 ^ attempt)
 		end
 	end
 
+	-- Never manufacture a default profile after a failed read. Doing that allows an
+	-- autosave to overwrite a real profile during a temporary DataStore outage.
 	if not success then
-		warn("[DataService] All load attempts failed for " .. player.Name .. ", using defaults")
+		profileLoadFailed[player] = true
+		warn("[DataService] Refusing to create/save fallback data for " .. player.Name .. " because loading failed")
+		if player.Parent == Players then
+			player:Kick("Your data could not be loaded safely. Please rejoin in a moment.")
+		end
+		return nil
 	end
 
 	local profile
-	if data then
+	if data ~= nil then
 		profile = reconcile(data, DEFAULT_PROFILE)
 		print("[DataService] Loaded profile for " .. player.Name)
 	else
@@ -98,31 +132,46 @@ function DataService.LoadProfile(player)
 		print("[DataService] Created new profile for " .. player.Name)
 	end
 
+	profile.Gold = normalizeGold(profile.Gold)
 	profiles[player] = profile
 	profileLoaded[player] = true
+	syncGoldDisplay(player, profile)
 	return profile
 end
 
 function DataService.SaveProfile(player)
 	local profile = profiles[player]
-	if not profile then
+	if not profile or profileLoaded[player] ~= true or profileLoadFailed[player] then
+		return false
+	end
+	if saving[player] then
 		return false
 	end
 
+	saving[player] = true
 	local key = getKey(player)
+	local snapshot = deepCopy(profile)
+	local saved = false
+
 	for attempt = 1, MAX_RETRIES do
 		local ok, err = pcall(function()
-			dataStore:SetAsync(key, profile)
+			dataStore:SetAsync(key, snapshot)
 		end)
 		if ok then
-			print("[DataService] Saved profile for " .. player.Name)
-			return true
-		else
-			warn("[DataService] Save attempt " .. attempt .. " failed for " .. player.Name .. ": " .. tostring(err))
-			if attempt < MAX_RETRIES then
-				task.wait(2 ^ attempt)
-			end
+			saved = true
+			break
 		end
+
+		warn("[DataService] Save attempt " .. attempt .. " failed for " .. player.Name .. ": " .. tostring(err))
+		if attempt < MAX_RETRIES then
+			task.wait(2 ^ attempt)
+		end
+	end
+
+	saving[player] = nil
+	if saved then
+		print("[DataService] Saved profile for " .. player.Name)
+		return true
 	end
 
 	warn("[DataService] All save attempts failed for " .. player.Name)
@@ -130,6 +179,7 @@ function DataService.SaveProfile(player)
 end
 
 function DataService.GetProfile(player)
+	if profileLoadFailed[player] then return nil end
 	if not profiles[player] then
 		return DataService.LoadProfile(player)
 	end
@@ -140,29 +190,32 @@ function DataService.UpdateProfile(player, callback)
 	local profile = DataService.GetProfile(player)
 	if not profile then return nil end
 	callback(profile)
+	syncGoldDisplay(player, profile)
 	return profile
 end
 
 function DataService.IsLoaded(player)
-	return profileLoaded[player] == true
+	return profileLoaded[player] == true and profileLoadFailed[player] ~= true
 end
 
 function DataService.GetGold(player)
 	local profile = DataService.GetProfile(player)
-	return profile and profile.Gold or 0
+	return profile and normalizeGold(profile.Gold) or 0
 end
 
 function DataService.SetGold(player, amount)
 	local profile = DataService.GetProfile(player)
 	if profile then
-		profile.Gold = math.max(0, amount)
+		profile.Gold = normalizeGold(amount)
+		syncGoldDisplay(player, profile)
 	end
 end
 
 function DataService.AddGold(player, amount)
 	local profile = DataService.GetProfile(player)
 	if profile then
-		profile.Gold = math.max(0, profile.Gold + amount)
+		profile.Gold = normalizeGold((profile.Gold or 0) + (tonumber(amount) or 0))
+		syncGoldDisplay(player, profile)
 	end
 end
 
@@ -174,20 +227,22 @@ end
 function DataService.AddClawTokens(player, amount)
 	local profile = DataService.GetProfile(player)
 	if profile then
-		profile.ClawTokens = math.max(0, profile.ClawTokens + amount)
+		profile.ClawTokens = math.max(0, (tonumber(profile.ClawTokens) or 0) + (tonumber(amount) or 0))
 	end
 end
 
 function DataService.UnloadProfile(player)
-	if profiles[player] then
+	if profiles[player] and profileLoaded[player] and not profileLoadFailed[player] then
 		DataService.SaveProfile(player)
-		profiles[player] = nil
-		profileLoaded[player] = nil
 	end
+	profiles[player] = nil
+	profileLoaded[player] = nil
+	profileLoadFailed[player] = nil
+	saving[player] = nil
 end
 
 Players.PlayerAdded:Connect(function(player)
-	DataService.LoadProfile(player)
+	task.spawn(DataService.LoadProfile, player)
 end)
 
 Players.PlayerRemoving:Connect(function(player)
@@ -198,17 +253,16 @@ task.spawn(function()
 	while true do
 		task.wait(AUTO_SAVE_INTERVAL)
 		for _, player in ipairs(Players:GetPlayers()) do
-			if profiles[player] then
+			if profiles[player] and profileLoaded[player] and not profileLoadFailed[player] then
 				task.spawn(DataService.SaveProfile, player)
 			end
 		end
-		print("[DataService] Auto-save complete")
 	end
 end)
 
 game:BindToClose(function()
 	for _, player in ipairs(Players:GetPlayers()) do
-		if profiles[player] then
+		if profiles[player] and profileLoaded[player] and not profileLoadFailed[player] then
 			DataService.SaveProfile(player)
 		end
 	end
