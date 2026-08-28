@@ -130,8 +130,9 @@ local function makeVisual(tool: Tool, handle: BasePart): (Model?, {VisualPart})
 	local outline = Instance.new("Highlight")
 	outline.Name = "SEVER_ThrownScytheOutline"
 	outline.Adornee = model
-	outline.FillTransparency = 1
-	outline.OutlineColor = Color3.fromRGB(255, 35, 45)
+	outline.FillColor = Color3.fromRGB(255, 20, 30)
+	outline.FillTransparency = 0.88
+	outline.OutlineColor = Color3.fromRGB(255, 0, 0)
 	outline.OutlineTransparency = 0
 	outline.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
 	outline.Parent = model
