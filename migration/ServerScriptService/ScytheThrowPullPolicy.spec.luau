@@ -1,7 +1,7 @@
 --!strict
--- Contract tests for the scythe throw hook/pull timing and tether strength.
--- This repo does not currently provide a Luau test runner, but keeping this as a pure
--- spec makes the intended behavior explicit and runnable once a harness is added.
+-- Contract tests for scythe throw hook timing, tether strength, and continuous path following.
+-- This repo does not currently provide a Luau test runner, but these pure contracts
+-- keep the intended behavior explicit and runnable once a harness is added.
 
 local Policy = require(script.Parent:WaitForChild("ScytheThrowPullPolicy"))
 
@@ -18,6 +18,13 @@ assert(tether.StopDistance >= 4 and tether.StopDistance <= 6, "hook must stop ne
 assert(Policy.IsHookActive(101.0, 100.0) == true, "active hook must suppress competing movement")
 assert(Policy.IsHookActive(100.0, 100.0) == false, "expired hook must release movement")
 assert(Policy.IsHookActive(nil, 100.0) == false, "missing hook timestamp is inactive")
+
+-- A successful catch must stay attached while the projectile finishes travelling outward.
+assert(Policy.ShouldContinueOutboundAfterContact(true) == true, "hooked targets must continue outbound with the scythe")
+assert(Policy.ShouldContinueOutboundAfterContact(false) == false, "defended/non-hook contact should reverse immediately")
+
+local outboundGoal = Policy.GetPathGoal(Vector3.new(24, 8, -3), 4)
+assert(outboundGoal == Vector3.new(24, 4, -3), "hook path should follow projectile X/Z without lifting target root")
 
 assert(Policy.DidHookFromDamageResult({
 	damage = 18,
