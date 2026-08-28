@@ -3,10 +3,12 @@
 local Policy = {}
 
 local PULL_DURATION = 0.72
+local PATH_UPDATE_INTERVAL = 1 / 120
 local TETHER_CONFIG = table.freeze({
-	MaxForce = 2_000_000,
-	MaxVelocity = 140,
-	Responsiveness = 65,
+	RigidityEnabled = true,
+	MaxForce = 4_000_000,
+	MaxVelocity = 320,
+	Responsiveness = 200,
 	StopDistance = 5,
 })
 
@@ -16,6 +18,10 @@ end
 
 function Policy.GetTetherConfig()
 	return TETHER_CONFIG
+end
+
+function Policy.GetPathUpdateInterval(): number
+	return PATH_UPDATE_INTERVAL
 end
 
 function Policy.IsHookActive(hookedUntil: any, now: number?): boolean
