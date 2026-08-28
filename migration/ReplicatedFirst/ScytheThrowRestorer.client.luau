@@ -8,6 +8,7 @@ local ReplicatedStorage = game:GetService("ReplicatedStorage")
 local RunService = game:GetService("RunService")
 
 local localPlayer = Players.LocalPlayer
+local PresentationPolicy = require(script.Parent:WaitForChild("ScytheThrowPresentationPolicy"))
 local ScytheSystems = ReplicatedStorage:WaitForChild("ScytheSystems")
 local UseMove = ScytheSystems:WaitForChild("Remotes"):WaitForChild("Loadout"):WaitForChild("UseMove") :: RemoteEvent
 
@@ -90,6 +91,45 @@ type VisualPart = {
 	source: BasePart,
 	oldLocalTransparency: number,
 }
+
+type HeldEffectState = {
+	instance: any,
+	oldEnabled: boolean,
+}
+
+local function captureHeldEffects(tool: Tool): {HeldEffectState}
+	local states: {HeldEffectState} = {}
+	for _, descendant in ipairs(tool:GetDescendants()) do
+		if PresentationPolicy.IsHeldEffectClass(descendant.ClassName) then
+			local effect = descendant :: any
+			table.insert(states, {
+				instance = effect,
+				oldEnabled = effect.Enabled == true,
+			})
+		end
+	end
+	return states
+end
+
+local function setHeldEffectsSuspended(states: {HeldEffectState}, suspended: boolean)
+	for _, item in ipairs(states) do
+		local effect = item.instance
+		if effect and effect.Parent then
+			if suspended then
+				effect.Enabled = false
+				-- Trails and particle emitters retain already-rendered segments/particles after
+				-- Enabled is switched off. Clear them so the held weapon disappears immediately.
+				if effect:IsA("Trail") or effect:IsA("ParticleEmitter") then
+					pcall(function()
+						effect:Clear()
+					end)
+				end
+			else
+				effect.Enabled = item.oldEnabled
+			end
+		end
+	end
+end
 
 local function makeVisual(tool: Tool, handle: BasePart): (Model?, {VisualPart})
 	local model = Instance.new("Model")
@@ -176,6 +216,7 @@ local function cleanupThrow(userId: number, token: number?)
 		state.connection:Disconnect()
 	end
 	setHeldScytheHidden(state.visualParts, false)
+	setHeldEffectsSuspended(state.heldEffects, false)
 	if state.model and state.model.Parent then
 		state.model:Destroy()
 	end
@@ -222,6 +263,7 @@ local function playThrow(player: Player, origin: Vector3, direction: Vector3, ra
 
 	local model, visualParts = makeVisual(tool, handle)
 	if not model then return end
+	local heldEffects = captureHeldEffects(tool)
 
 	local userId = player.UserId
 	cleanupThrow(userId)
@@ -248,6 +290,7 @@ local function playThrow(player: Player, origin: Vector3, direction: Vector3, ra
 		player = player,
 		model = model,
 		visualParts = visualParts,
+		heldEffects = heldEffects,
 		heldRotation = handle.CFrame.Rotation,
 		depthAxis = depthAxis,
 		spinSign = spinSign,
@@ -264,6 +307,7 @@ local function playThrow(player: Player, origin: Vector3, direction: Vector3, ra
 	activeThrows[userId] = state
 
 	setHeldScytheHidden(visualParts, true)
+	setHeldEffectsSuspended(heldEffects, true)
 
 	state.connection = RunService.RenderStepped:Connect(function()
 		if activeTokens[userId] ~= token or activeThrows[userId] ~= state or not model.Parent then
