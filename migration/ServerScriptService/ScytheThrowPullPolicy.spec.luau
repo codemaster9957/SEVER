@@ -1,5 +1,5 @@
 --!strict
--- Contract tests for the scythe throw hook/pull timing.
+-- Contract tests for the scythe throw hook/pull timing and tether strength.
 -- This repo does not currently provide a Luau test runner, but keeping this as a pure
 -- spec makes the intended behavior explicit and runnable once a harness is added.
 
@@ -8,6 +8,12 @@ local Policy = require(script.Parent:WaitForChild("ScytheThrowPullPolicy"))
 assert(Policy.GetPullDuration(0.12) >= 0.65, "close catches must still get a visible pull window")
 assert(Policy.GetPullDuration(0.42) >= 0.65, "pull duration must be independent of visual return duration")
 assert(Policy.GetPullDuration(1.2) <= 0.85, "hook pull must remain bounded")
+
+local tether = Policy.GetTetherConfig()
+assert(tether.MaxForce >= 1_000_000, "hook tether needs enough force to beat humanoid movement")
+assert(tether.MaxVelocity >= 100, "hook tether must visibly drag targets")
+assert(tether.Responsiveness >= 40, "hook tether must react immediately")
+assert(tether.StopDistance >= 4 and tether.StopDistance <= 6, "hook must stop near, not inside, the thrower")
 
 assert(Policy.DidHookFromDamageResult({
 	damage = 18,
