@@ -16,7 +16,7 @@ local arenas: {ArenaStub} = {
 	{Name = "BrokenArena", Usable = false},
 }
 
-local locked = {
+local locked: {[string]: boolean} = {
 	Arena2 = true,
 	Arena4 = true,
 }
