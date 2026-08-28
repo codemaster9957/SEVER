@@ -27,6 +27,7 @@ local THROW_OUT_DURATION = 0.38
 local THROW_RETURN_SPEED = 126
 local THROW_MIN_RETURN_DURATION = 0.12
 local THROW_MAX_RETURN_DURATION = 0.42
+local HOOK_SAFETY_DURATION = 2.0
 
 local cooldowns: {[Player]: {[string]: number}} = {}
 
@@ -171,34 +172,28 @@ local function setServerOwnership(root: BasePart, serverOwned: boolean)
 	end)
 end
 
-local function pullCaughtTarget(player: Player, target: Model, duration: number)
-	local targetHumanoid, targetRoot = getLiveTargetState(target)
-	if not targetHumanoid or not targetRoot or targetRoot.Anchored then return end
+type HookState = {
+	target: Model,
+	targetPlayer: Player?,
+	attachment: Attachment,
+	tether: AlignPosition,
+	pathY: number,
+	oldWalkSpeed: number,
+	oldJumpPower: number,
+	oldJumpHeight: number,
+	oldAutoRotate: boolean,
+	finished: boolean,
+}
+
+local function beginHook(target: Model): HookState?
+	local humanoid, root = getLiveTargetState(target)
+	if not humanoid or not root or root.Anchored then return nil end
 
 	local config = ScytheThrowPullPolicy.GetTetherConfig()
 	local targetPlayer = Players:GetPlayerFromCharacter(target)
-	local oldWalkSpeed = targetHumanoid.WalkSpeed
-	local oldJumpPower = targetHumanoid.JumpPower
-	local oldJumpHeight = targetHumanoid.JumpHeight
-	local oldAutoRotate = targetHumanoid.AutoRotate
-	local finishAt = os.clock() + duration
-
-	targetRoot.AssemblyLinearVelocity = Vector3.zero
-	targetRoot.AssemblyAngularVelocity = Vector3.zero
-	targetHumanoid.WalkSpeed = 0
-	targetHumanoid.JumpPower = 0
-	targetHumanoid.JumpHeight = 0
-	targetHumanoid.AutoRotate = false
-	targetHumanoid:Move(Vector3.zero, false)
-	target:SetAttribute("ScytheHookedUntil", finishAt)
-
-	if targetPlayer then
-		setServerOwnership(targetRoot, true)
-	end
-
 	local attachment = Instance.new("Attachment")
 	attachment.Name = "ScytheHookAttachment"
-	attachment.Parent = targetRoot
+	attachment.Parent = root
 
 	local tether = Instance.new("AlignPosition")
 	tether.Name = "ScytheHookTether"
@@ -209,48 +204,103 @@ local function pullCaughtTarget(player: Player, target: Model, duration: number)
 	tether.MaxForce = config.MaxForce
 	tether.MaxVelocity = config.MaxVelocity
 	tether.Responsiveness = config.Responsiveness
-	tether.Position = targetRoot.Position
-	tether.Parent = targetRoot
+	tether.Position = root.Position
+	tether.Parent = root
 
-	while os.clock() < finishAt do
+	local state: HookState = {
+		target = target,
+		targetPlayer = targetPlayer,
+		attachment = attachment,
+		tether = tether,
+		pathY = root.Position.Y,
+		oldWalkSpeed = humanoid.WalkSpeed,
+		oldJumpPower = humanoid.JumpPower,
+		oldJumpHeight = humanoid.JumpHeight,
+		oldAutoRotate = humanoid.AutoRotate,
+		finished = false,
+	}
+
+	root.AssemblyLinearVelocity = Vector3.zero
+	root.AssemblyAngularVelocity = Vector3.zero
+	humanoid.WalkSpeed = 0
+	humanoid.JumpPower = 0
+	humanoid.JumpHeight = 0
+	humanoid.AutoRotate = false
+	humanoid:Move(Vector3.zero, false)
+	target:SetAttribute("ScytheHookedUntil", os.clock() + HOOK_SAFETY_DURATION)
+	if targetPlayer then
+		setServerOwnership(root, true)
+	end
+
+	return state
+end
+
+local function updateHookGoal(state: HookState, projectilePosition: Vector3): boolean
+	if state.finished or not state.target.Parent or not state.tether.Parent then return false end
+	local humanoid, root = getLiveTargetState(state.target)
+	if not humanoid or not root or root.Anchored then return false end
+
+	state.tether.Position = ScytheThrowPullPolicy.GetPathGoal(projectilePosition, state.pathY)
+	humanoid:Move(Vector3.zero, false)
+	return true
+end
+
+local function finishHook(state: HookState?)
+	if not state or state.finished then return end
+	state.finished = true
+	if state.tether.Parent then state.tether:Destroy() end
+	if state.attachment.Parent then state.attachment:Destroy() end
+
+	local humanoid, root = getLiveTargetState(state.target)
+	if root then
+		root.AssemblyLinearVelocity = Vector3.new(0, root.AssemblyLinearVelocity.Y, 0)
+		root.AssemblyAngularVelocity = Vector3.zero
+		if state.targetPlayer then
+			setServerOwnership(root, false)
+		end
+	end
+	if humanoid then
+		humanoid.WalkSpeed = state.oldWalkSpeed
+		humanoid.JumpPower = state.oldJumpPower
+		humanoid.JumpHeight = state.oldJumpHeight
+		humanoid.AutoRotate = state.oldAutoRotate
+	end
+	if state.target.Parent then
+		state.target:SetAttribute("ScytheHookedUntil", nil)
+	end
+end
+
+local function followHookReturn(player: Player, state: HookState, returnStart: Vector3, duration: number)
+	local config = ScytheThrowPullPolicy.GetTetherConfig()
+	local startedAt = os.clock()
+	state.target:SetAttribute("ScytheHookedUntil", startedAt + duration + 0.2)
+
+	while os.clock() - startedAt < duration do
 		local _, sourceHumanoid, sourceRoot = getCharacterState(player)
-		targetHumanoid, targetRoot = getLiveTargetState(target)
-		if not sourceHumanoid or not sourceRoot or not targetHumanoid or not targetRoot then
-			break
-		end
-		if targetRoot.Anchored then break end
+		if not sourceHumanoid or not sourceRoot then break end
 
-		local delta = sourceRoot.Position - targetRoot.Position
-		local horizontal = Vector3.new(delta.X, 0, delta.Z)
-		if horizontal.Magnitude <= config.StopDistance then
-			break
+		local alpha = math.clamp((os.clock() - startedAt) / math.max(duration, 0.01), 0, 1)
+		local eased = 1 - (1 - alpha) * (1 - alpha)
+		local scythePoint = returnStart:Lerp(sourceRoot.Position, eased)
+
+		local fromSource = Vector3.new(
+			scythePoint.X - sourceRoot.Position.X,
+			0,
+			scythePoint.Z - sourceRoot.Position.Z
+		)
+		if fromSource.Magnitude < config.StopDistance then
+			local approach = Vector3.new(
+				returnStart.X - sourceRoot.Position.X,
+				0,
+				returnStart.Z - sourceRoot.Position.Z
+			)
+			if approach.Magnitude > 0.001 then
+				scythePoint = sourceRoot.Position + approach.Unit * config.StopDistance
+			end
 		end
 
-		local goal = sourceRoot.Position - horizontal.Unit * config.StopDistance
-		tether.Position = Vector3.new(goal.X, targetRoot.Position.Y, goal.Z)
-		targetHumanoid:Move(Vector3.zero, false)
+		if not updateHookGoal(state, scythePoint) then break end
 		RunService.Heartbeat:Wait()
-	end
-
-	if tether.Parent then tether:Destroy() end
-	if attachment.Parent then attachment:Destroy() end
-
-	local finalHumanoid, finalRoot = getLiveTargetState(target)
-	if finalRoot then
-		finalRoot.AssemblyLinearVelocity = Vector3.new(0, finalRoot.AssemblyLinearVelocity.Y, 0)
-		finalRoot.AssemblyAngularVelocity = Vector3.zero
-		if targetPlayer then
-			setServerOwnership(finalRoot, false)
-		end
-	end
-	if finalHumanoid then
-		finalHumanoid.WalkSpeed = oldWalkSpeed
-		finalHumanoid.JumpPower = oldJumpPower
-		finalHumanoid.JumpHeight = oldJumpHeight
-		finalHumanoid.AutoRotate = oldAutoRotate
-	end
-	if target.Parent then
-		target:SetAttribute("ScytheHookedUntil", nil)
 	end
 end
 
@@ -270,13 +320,15 @@ local function performThrow(player: Player)
 
 	task.spawn(function()
 		local returnPosition = origin + direction * THROW_RANGE
-		local caughtTarget: Model? = nil
+		local hookState: HookState? = nil
+		local contactedWithoutHook = false
 
 		for step = 1, outwardSteps do
 			task.wait(outwardStepTime)
 
 			local currentCharacter, currentHumanoid, currentRoot = getCharacterState(player)
 			if currentCharacter ~= character or not currentHumanoid or not currentRoot then
+				finishHook(hookState)
 				UseMove:FireAllClients("FX", "scythe_throw_cancel", player.UserId)
 				return
 			end
@@ -284,31 +336,42 @@ local function performThrow(player: Player)
 			local distance = math.min(THROW_RANGE, step * THROW_STEP)
 			local center = origin + direction * distance
 			returnPosition = center
-			local parts = workspace:GetPartBoundsInBox(CFrame.new(center), THROW_HALF_SIZE * 2, params)
-			local targets = findTargets(player, parts)
-			if #targets > 0 then
-				local target = targets[1]
-				local humanoid = target:FindFirstChildOfClass("Humanoid")
-				if humanoid then
-					local result = DamageHandler.ApplyDamage(humanoid, THROW_DAMAGE, player)
-					if ScytheThrowPullPolicy.DidHookFromDamageResult(result) then
-						caughtTarget = target
-						local _, caughtRoot = getLiveTargetState(target)
-						if caughtRoot then
-							caughtRoot.AssemblyLinearVelocity = Vector3.zero
-							caughtRoot.AssemblyAngularVelocity = Vector3.zero
+
+			if hookState then
+				if not updateHookGoal(hookState, center) then
+					finishHook(hookState)
+					hookState = nil
+				end
+			else
+				local parts = workspace:GetPartBoundsInBox(CFrame.new(center), THROW_HALF_SIZE * 2, params)
+				local targets = findTargets(player, parts)
+				if #targets > 0 then
+					local target = targets[1]
+					local humanoid = target:FindFirstChildOfClass("Humanoid")
+					if humanoid then
+						local result = DamageHandler.ApplyDamage(humanoid, THROW_DAMAGE, player)
+						local didHook = ScytheThrowPullPolicy.DidHookFromDamageResult(result)
+						if didHook then
+							hookState = beginHook(target)
+							if hookState then
+								updateHookGoal(hookState, center)
+								-- DamageHandler gives attacker recoil on damaging hits; cancel it for the hook.
+								currentRoot.AssemblyLinearVelocity = Vector3.new(0, currentRoot.AssemblyLinearVelocity.Y, 0)
+							end
 						end
-						-- DamageHandler gives the attacker recoil on every damaging hit. That feels wrong
-						-- for a hooked ranged throw and makes the pull look much weaker, so cancel it here.
-						currentRoot.AssemblyLinearVelocity = Vector3.new(0, currentRoot.AssemblyLinearVelocity.Y, 0)
+
+						if not hookState or not ScytheThrowPullPolicy.ShouldContinueOutboundAfterContact(didHook) then
+							contactedWithoutHook = true
+							break
+						end
 					end
 				end
-				break
 			end
 		end
 
 		local _, returnHumanoid, returnRoot = getCharacterState(player)
 		if not returnHumanoid or not returnRoot then
+			finishHook(hookState)
 			UseMove:FireAllClients("FX", "scythe_throw_cancel", player.UserId)
 			return
 		end
@@ -319,10 +382,8 @@ local function performThrow(player: Player)
 			THROW_MIN_RETURN_DURATION,
 			THROW_MAX_RETURN_DURATION
 		)
-		local pullDuration: number? = nil
-		if caughtTarget then
-			pullDuration = ScytheThrowPullPolicy.GetPullDuration(returnDuration)
-			returnDuration = math.max(returnDuration, pullDuration)
+		if hookState then
+			returnDuration = math.max(returnDuration, ScytheThrowPullPolicy.GetPullDuration(returnDuration))
 		end
 
 		UseMove:FireAllClients(
@@ -333,10 +394,15 @@ local function performThrow(player: Player)
 			returnDuration
 		)
 
-		if caughtTarget and pullDuration then
-			pullCaughtTarget(player, caughtTarget, pullDuration)
+		if hookState then
+			followHookReturn(player, hookState, returnPosition, returnDuration)
+			finishHook(hookState)
 		else
 			task.wait(returnDuration)
+		end
+
+		if contactedWithoutHook then
+			-- Contact still reverses the boomerang immediately; defence simply prevented attachment.
 		end
 
 		if character.Parent and character:GetAttribute("SpecialMoveActive") == "scythe_throw" then
