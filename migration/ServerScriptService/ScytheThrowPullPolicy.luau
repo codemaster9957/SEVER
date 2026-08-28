@@ -23,6 +23,17 @@ function Policy.IsHookActive(hookedUntil: any, now: number?): boolean
 	return type(hookedUntil) == "number" and hookedUntil > current
 end
 
+function Policy.ShouldContinueOutboundAfterContact(didHook: boolean): boolean
+	-- A real damaging catch rides the remaining outbound path before the boomerang reverses.
+	-- Defended/non-hook contact reverses immediately and never attaches the target.
+	return didHook == true
+end
+
+function Policy.GetPathGoal(projectilePosition: Vector3, targetRootY: number): Vector3
+	-- Follow the scythe horizontally through the side-on lane without lifting/dropping the victim.
+	return Vector3.new(projectilePosition.X, targetRootY, projectilePosition.Z)
+end
+
 function Policy.DidHookFromDamageResult(result: any): boolean
 	return type(result) == "table"
 		and type(result.damage) == "number"
