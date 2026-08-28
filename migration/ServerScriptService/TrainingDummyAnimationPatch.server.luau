@@ -3,6 +3,7 @@ local ServerScriptService = game:GetService("ServerScriptService")
 local CombatAI = require(ServerScriptService:WaitForChild("TrainingDummyCombatAI"))
 local TrainingDummyAnimator = require(ServerScriptService:WaitForChild("TrainingDummyAnimator"))
 local Lifecycle = require(ServerScriptService:WaitForChild("TrainingDummyBattleLifecycle"))
+local ScytheThrowPullPolicy = require(ServerScriptService:WaitForChild("ScytheThrowPullPolicy"))
 
 if CombatAI.__SEVERAnimationPatchInstalled then
 	return
@@ -27,6 +28,22 @@ local function stopIntroMotion(self)
 		self.root.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
 		self.root.AssemblyAngularVelocity = Vector3.zero
 	end
+	if self._severAnimator then self._severAnimator:SetLocomotionEnabled(false) end
+end
+
+local function isHooked(self)
+	return self.dummy ~= nil
+		and ScytheThrowPullPolicy.IsHookActive(self.dummy:GetAttribute("ScytheHookedUntil"))
+end
+
+local function stopHookCompetingMotion(self)
+	if self.dummy then
+		self.dummy:SetAttribute("AttackActiveUntil", 0)
+		self.dummy:SetAttribute("IsBlocking", false)
+		self.dummy:SetAttribute("IsParrying", false)
+	end
+	-- Do not zero root velocity here: the AlignPosition hook tether owns physics while caught.
+	if self.humanoid then self.humanoid:Move(Vector3.zero, false) end
 	if self._severAnimator then self._severAnimator:SetLocomotionEnabled(false) end
 end
 
@@ -59,6 +76,7 @@ end
 
 CombatAI._heartbeat = function(self, dt)
 	if not Lifecycle.ShouldRunAI(self.battle) then stopIntroMotion(self) return end
+	if isHooked(self) then stopHookCompetingMotion(self) return end
 	if self.dummy then self.dummy:SetAttribute("TrainingFightLive", true) end
 	if self._severAnimator then self._severAnimator:SetLocomotionEnabled(self.level >= 1) end
 	return originalHeartbeat(self, dt)
@@ -68,7 +86,7 @@ local function wrapAction(methodName, animationName)
 	local original = CombatAI[methodName]
 	if type(original) ~= "function" then return end
 	CombatAI[methodName] = function(self, ...)
-		if not Lifecycle.ShouldRunAI(self.battle) then return false end
+		if not Lifecycle.ShouldRunAI(self.battle) or isHooked(self) then return false end
 		local result = original(self, ...)
 		if result and self._severAnimator then self._severAnimator:PlayAction(animationName) end
 		return result
