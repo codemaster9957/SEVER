@@ -15,6 +15,10 @@ assert(tether.MaxVelocity >= 100, "hook tether must visibly drag targets")
 assert(tether.Responsiveness >= 40, "hook tether must react immediately")
 assert(tether.StopDistance >= 4 and tether.StopDistance <= 6, "hook must stop near, not inside, the thrower")
 
+assert(Policy.IsHookActive(101.0, 100.0) == true, "active hook must suppress competing movement")
+assert(Policy.IsHookActive(100.0, 100.0) == false, "expired hook must release movement")
+assert(Policy.IsHookActive(nil, 100.0) == false, "missing hook timestamp is inactive")
+
 assert(Policy.DidHookFromDamageResult({
 	damage = 18,
 	blocked = false,
