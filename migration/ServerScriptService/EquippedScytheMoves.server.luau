@@ -28,12 +28,6 @@ local THROW_RETURN_SPEED = 126
 local THROW_MIN_RETURN_DURATION = 0.12
 local THROW_MAX_RETURN_DURATION = 0.42
 
-local PULL_STOP_DISTANCE = 5
-local PULL_MIN_SPEED = 70
-local PULL_MAX_SPEED = 130
-local PULL_VERTICAL_GAIN = 4
-local PULL_MAX_VERTICAL_SPEED = 18
-
 local cooldowns: {[Player]: {[string]: number}} = {}
 
 local function getCharacterState(player: Player): (Model?, Humanoid?, BasePart?)
@@ -81,12 +75,11 @@ local function isValidTarget(player: Player, model: Model): boolean
 		return MatchManager.IsPlayerInMatch(targetPlayer)
 	end
 
-	-- Training battle NPCs are explicitly marked InMatch by DummyBattleServer.
 	return model:GetAttribute("InMatch") == true
 end
 
 local function findTargets(player: Player, parts: {BasePart}): {Model}
-	local seen: {[Model]: boolean = {}
+	local seen: {[Model]: boolean} = {}
 	local result = {}
 	for _, part in ipairs(parts) do
 		local model = part:FindFirstAncestorOfClass("Model")
@@ -108,8 +101,6 @@ end
 
 local function horizontalFacing(root: BasePart): Vector3
 	local look = root.CFrame.LookVector
-	-- SEVER's battle movement is side-on. Prefer the X lane, but keep a Z fallback
-	-- for arenas whose rig is rotated 90 degrees.
 	if math.abs(look.X) >= math.abs(look.Z) then
 		return Vector3.new(if look.X >= 0 then 1 else -1, 0, 0)
 	end
@@ -184,6 +175,7 @@ local function pullCaughtTarget(player: Player, target: Model, duration: number)
 	local targetHumanoid, targetRoot = getLiveTargetState(target)
 	if not targetHumanoid or not targetRoot or targetRoot.Anchored then return end
 
+	local config = ScytheThrowPullPolicy.GetTetherConfig()
 	local targetPlayer = Players:GetPlayerFromCharacter(target)
 	local oldWalkSpeed = targetHumanoid.WalkSpeed
 	local oldJumpPower = targetHumanoid.JumpPower
@@ -191,19 +183,34 @@ local function pullCaughtTarget(player: Player, target: Model, duration: number)
 	local oldAutoRotate = targetHumanoid.AutoRotate
 	local finishAt = os.clock() + duration
 
-	-- DamageHandler applies its normal outward knockback first. A hooked throw needs to
-	-- take control immediately, otherwise the short-range knockback can win the first frames.
 	targetRoot.AssemblyLinearVelocity = Vector3.zero
 	targetRoot.AssemblyAngularVelocity = Vector3.zero
 	targetHumanoid.WalkSpeed = 0
 	targetHumanoid.JumpPower = 0
 	targetHumanoid.JumpHeight = 0
 	targetHumanoid.AutoRotate = false
+	targetHumanoid:Move(Vector3.zero, false)
 	target:SetAttribute("ScytheHookedUntil", finishAt)
 
 	if targetPlayer then
 		setServerOwnership(targetRoot, true)
 	end
+
+	local attachment = Instance.new("Attachment")
+	attachment.Name = "ScytheHookAttachment"
+	attachment.Parent = targetRoot
+
+	local tether = Instance.new("AlignPosition")
+	tether.Name = "ScytheHookTether"
+	tether.Mode = Enum.PositionAlignmentMode.OneAttachment
+	tether.Attachment0 = attachment
+	tether.ApplyAtCenterOfMass = true
+	tether.RigidityEnabled = false
+	tether.MaxForce = config.MaxForce
+	tether.MaxVelocity = config.MaxVelocity
+	tether.Responsiveness = config.Responsiveness
+	tether.Position = targetRoot.Position
+	tether.Parent = targetRoot
 
 	while os.clock() < finishAt do
 		local _, sourceHumanoid, sourceRoot = getCharacterState(player)
@@ -215,21 +222,23 @@ local function pullCaughtTarget(player: Player, target: Model, duration: number)
 
 		local delta = sourceRoot.Position - targetRoot.Position
 		local horizontal = Vector3.new(delta.X, 0, delta.Z)
-		if horizontal.Magnitude <= PULL_STOP_DISTANCE then
-			targetRoot.AssemblyLinearVelocity = Vector3.new(0, targetRoot.AssemblyLinearVelocity.Y, 0)
+		if horizontal.Magnitude <= config.StopDistance then
 			break
 		end
 
-		local speed = math.clamp(horizontal.Magnitude * 4.2, PULL_MIN_SPEED, PULL_MAX_SPEED)
-		local vertical = math.clamp(delta.Y * PULL_VERTICAL_GAIN, -PULL_MAX_VERTICAL_SPEED, PULL_MAX_VERTICAL_SPEED)
-		targetRoot.AssemblyLinearVelocity = horizontal.Unit * speed + Vector3.new(0, vertical, 0)
+		local goal = sourceRoot.Position - horizontal.Unit * config.StopDistance
+		tether.Position = Vector3.new(goal.X, targetRoot.Position.Y, goal.Z)
+		targetHumanoid:Move(Vector3.zero, false)
 		RunService.Heartbeat:Wait()
 	end
 
+	if tether.Parent then tether:Destroy() end
+	if attachment.Parent then attachment:Destroy() end
+
 	local finalHumanoid, finalRoot = getLiveTargetState(target)
 	if finalRoot then
-		local velocity = finalRoot.AssemblyLinearVelocity
-		finalRoot.AssemblyLinearVelocity = Vector3.new(0, velocity.Y, 0)
+		finalRoot.AssemblyLinearVelocity = Vector3.new(0, finalRoot.AssemblyLinearVelocity.Y, 0)
+		finalRoot.AssemblyAngularVelocity = Vector3.zero
 		if targetPlayer then
 			setServerOwnership(finalRoot, false)
 		end
@@ -257,7 +266,6 @@ local function performThrow(player: Player)
 
 	character:SetAttribute("SpecialMoveActive", "scythe_throw")
 	character:SetAttribute("AttackActiveUntil", os.clock() + THROW_OUT_DURATION + 0.9)
-
 	UseMove:FireAllClients("FX", "scythe_throw", player.UserId, origin, direction, THROW_RANGE)
 
 	task.spawn(function()
@@ -287,13 +295,14 @@ local function performThrow(player: Player)
 						caughtTarget = target
 						local _, caughtRoot = getLiveTargetState(target)
 						if caughtRoot then
-							-- Cancel DamageHandler's normal outward throw knockback immediately.
 							caughtRoot.AssemblyLinearVelocity = Vector3.zero
 							caughtRoot.AssemblyAngularVelocity = Vector3.zero
 						end
+						-- DamageHandler gives the attacker recoil on every damaging hit. That feels wrong
+						-- for a hooked ranged throw and makes the pull look much weaker, so cancel it here.
+						currentRoot.AssemblyLinearVelocity = Vector3.new(0, currentRoot.AssemblyLinearVelocity.Y, 0)
 					end
 				end
-				-- Any actual contact makes the boomerang reverse. Successful defence prevents the pull.
 				break
 			end
 		end
@@ -313,7 +322,6 @@ local function performThrow(player: Player)
 		local pullDuration: number? = nil
 		if caughtTarget then
 			pullDuration = ScytheThrowPullPolicy.GetPullDuration(returnDuration)
-			-- On a hook, keep the visible scythe attached to the same return window as the drag.
 			returnDuration = math.max(returnDuration, pullDuration)
 		end
 
@@ -342,8 +350,6 @@ UseMove.OnServerEvent:Connect(function(player: Player, slotIndex: any)
 	if slot ~= 1 and slot ~= 2 then return end
 	if not canUseMove(player) then return end
 
-	-- Never trust a move id supplied by the client. The server resolves the move
-	-- exclusively from the replicated, server-owned equipped slot.
 	local moveId = player:GetAttribute("EquippedMove" .. tostring(slot))
 	if type(moveId) ~= "string" or not LoadoutPolicy.IsEquipped({
 		player:GetAttribute("EquippedMove1"),
